@@ -98,7 +98,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     median_depth = render_median[:, :, :, 0]
     render_normals = render_normals[0].permute(2, 0, 1)
     
-    radii = info["radii"].squeeze(0) # [N,]
+    radii = info["radii"].squeeze(0).max(dim=-1).values # [N,]
 
     render_ins_feature = None
     if render_instance:

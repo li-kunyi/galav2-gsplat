@@ -78,7 +78,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         if not viewpoint_stack:
             viewpoint_stack = scene.getTrainCameras().copy()
             viewpoint_indices = list(range(len(viewpoint_stack)))
-        rand_idx = randint(0, len(viewpoint_indices) - 1)
+        rand_idx = randint(0, len(viewpoint_stack) - 1)
         viewpoint_cam = viewpoint_stack.pop(rand_idx)
 
         # Render
@@ -141,16 +141,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         # language loss: codebook training
         if opt.train_semantic:
-            tgt_feature, tgt_feature_mask = viewpoint_cam.get_target_feature(dataset.lf_path, dataset.feature_level) # Shape gt_lan_feat: [512, H, W] Shape language_feature_mask: [1, H, W]
+            tgt_feature, valid_mask = viewpoint_cam.get_target_feature(dataset.lf_path, feature_level=0) # Shape gt_lan_feat: [512, H, W] Shape language_feature_mask: [1, H, W]
             
             # Attention forward pass
-            instance_feature = instance_feature.permute(1, 2, 0).unsqueeze(0) # From[D=16, H=730, W=988] to [1, H=730, W=988, D=16]
-            rgb = image.permute(1, 2, 0).unsqueeze(0)                     # From [C=3, H=730, W=988] to [1, H=730, W=988, C=3]
+            instance_feature = instance_feature.permute(1, 2, 0) # From[D=16, H=730, W=988] to [H=730, W=988, D=16]
+            rgb = image.permute(1, 2, 0)          # From [C=3, H=730, W=988] to [H=730, W=988, C=3]
 
             feature = torch.cat([rgb, instance_feature], dim=-1)  # [1, H, W, C+D]
 
-            # Compute loss
-            loss, ent_loss = 0.0, None
             batchsize = 32768
 
             # Load gt instance masks from the camera
@@ -160,13 +158,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             # Sample a random set of pixels from the image for contrastive learning
             random_idx = torch.randint(0, viewpoint_cam.image_width * viewpoint_cam.image_height, [batchsize])     # Shape: [batchsize]
 
-            ##TODO ??? why multiply tgt_feature with tgt_feature_mask?
-            tgt_feature_flat = (tgt_feature*tgt_feature_mask).reshape(dataset.language_feature_dim, -1).permute(1, 0) # Reshape lang features to (num_pixels, feature_dim)
+            tgt_feature_flat = tgt_feature.reshape(tgt_feature.shape[0], -1).permute(1, 0) # Reshape lang features to (num_pixels, feature_dim)
             tgt_feature_sample = tgt_feature_flat[random_idx]
 
             feature_sample = feature.reshape(-1, feature.shape[-1])[random_idx]  # [1, H*W, C+D]
 
-            out_feature, attn_weights = attn_module(feature_sample, tgt_feature_sample)
+            out_feature, updated_in_slots, updated_tgt_slots, attn_weights = attn_module(feature_sample.float(), tgt_feature_sample.float())
 
             cossim_loss = cosine_similarity(out_feature, tgt_feature_sample)  
             loss += opt.lambda_cossim * cossim_loss
@@ -175,6 +172,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             loss += ent_loss
 
         loss.backward()
+
+        if opt.train_semantic:
+            # update slots
+            attn_module.update_slots(updated_in_slots, updated_tgt_slots)
 
         iter_end.record()
 

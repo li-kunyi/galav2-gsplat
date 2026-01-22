@@ -98,12 +98,14 @@ class Camera(nn.Module):
         
         target_feature_name = os.path.join(target_feature_dir, self.image_name.split('.')[0])
         
-        seg_map = torch.from_numpy(np.load(target_feature_name + '_s.npy'))  # seg_map: torch.Size([4, 730, 988])
-        feature_map = torch.from_numpy(np.load(target_feature_name + '_f.npy')) # feature_map: torch.Size([281, 512])
+        seg_map = torch.from_numpy(np.load(target_feature_name + '_s.npy'))  # seg_map: torch.Size([4, H, W])
+        if seg_map.ndim == 2:
+            seg_map = seg_map.unsqueeze(0)
+        feature_map = torch.from_numpy(np.load(target_feature_name + '_f.npy')) # feature_map: torch.Size([N, 512])
         seg_map = seg_map.cuda()
         feature_map = feature_map.cuda()
         
-        seg = seg_map[:, self.y, self.x].squeeze(-1).long()
+        seg = seg_map[..., self.y, self.x].squeeze(-1).long()
         mask = seg != -1
         if feature_level == 0: # default
             point_feature1 = feature_map[seg[0:1]].squeeze(0)

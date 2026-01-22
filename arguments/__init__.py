@@ -65,10 +65,7 @@ class ModelParams(ParamGroup):
         g = super().extract(args)
         g.source_path = os.path.abspath(g.source_path)
         g.im_path = os.path.join(g.source_path, "omniseg3d/instance_masks")
-        try :
-            g.lf_path = os.path.join(g.source_path, g.language_features_name)
-        except:
-            pass
+        g.lf_path = os.path.join(g.source_path, "omniseg3d/language_features_ins")
         return g
 
 class PipelineParams(ParamGroup):
@@ -114,7 +111,7 @@ class OptimizationParams(ParamGroup):
         self.lambda_ent = 0.01
 
         self.instance_feature_dim = 6
-        self.target_feature_dim = 768
+        self.target_feature_dim = 512
         self.slot_num = 64
         self.instance_slot_dim = 32
         self.target_slot_dim = 128

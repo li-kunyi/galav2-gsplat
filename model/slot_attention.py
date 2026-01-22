@@ -57,7 +57,7 @@ class SlotAttention(nn.Module):
 
             # Attention logits [N, M]
             logits = torch.matmul(in_q, in_k.T) / math.sqrt(D)
-            attn = F.softmax(logits, dim=0)  # softmax over slots
+            attn = F.softmax(logits, dim=0)  # softmax over slots  TODO: check dmension
 
             # Aggregate features
             in_updates = torch.matmul(attn, in_v)  # [N, D]
@@ -121,8 +121,8 @@ class CrossAttention(nn.Module):
 class Attention(nn.Module):
     def __init__(self, in_feat_dim, tgt_feat_dim, num_slots, in_slot_dim, tgt_slot_dim, iters=3, train=True):
         super().__init__()
-        self.in_slots = torch.randn(num_slots, in_slot_dim, requires_grad=True)
-        self.tgt_slots = torch.randn(num_slots, tgt_slot_dim, requires_grad=True)
+        self.in_slots = torch.randn(num_slots, in_slot_dim, requires_grad=True, device='cuda:0')
+        self.tgt_slots = torch.randn(num_slots, tgt_slot_dim, requires_grad=True, device='cuda:0')
 
         if train:
             self.slot_attn = SlotAttention(in_feat_dim, tgt_feat_dim, num_slots, in_slot_dim, tgt_slot_dim, iters)
@@ -142,8 +142,8 @@ class Attention(nn.Module):
         return out_flat
     
     def update_slots(self, in_slots, tgt_slots):
-        self.in_slots = in_slots.detach().require_grad_(True)
-        self.tgt_slots = tgt_slots.detach().require_grad_(True)
+        self.in_slots = in_slots.detach().requires_grad_(True)
+        self.tgt_slots = tgt_slots.detach().requires_grad_(True)
 
     def densification_and_prune(self, feats, th=0.7):
         with torch.no_grad():
