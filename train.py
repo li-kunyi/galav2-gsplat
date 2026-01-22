@@ -91,6 +91,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         if iteration > 15000:
             render_instance = True
         render_pkg = render(viewpoint_cam, gaussians, pipe, bg, render_instance=render_instance)
+
         image, viewspace_point_tensor, visibility_filter, radii = \
             render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
 
@@ -132,7 +133,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
             # Sample a random set of pixels from the image for contrastive learning
             random_idx = torch.randint(0, viewpoint_cam.image_width * viewpoint_cam.image_height, [batchsize])
-            instance_feature_flat = instance_feature.reshape(dataset.instance_feature_dim, -1).permute(1, 0) # Reshape instance features to (num_pixels, feature_dim)
+            instance_feature_flat = instance_feature.reshape(opt.instance_feature_dim, -1).permute(1, 0) # Reshape instance features to (num_pixels, feature_dim)
             instance_feature_sample = instance_feature_flat[random_idx]
             # Compute contrastive clustering loss based on instance assignments
             instance_loss = constrastive_clustering_loss(instance_feature_sample, instance_mask_flat[random_idx])

@@ -31,8 +31,8 @@ git clone git@github.com:JoannaCCJH/occamlgs.git --recursive
 
 ### Environment Setup
 ```bash
-micromamba create -n occamlgs python=3.10
-micromamba activate occamlgs
+conda create -n galav2 python=3.10
+conda activate galav2
 pip install torch==2.2.2 torchvision==0.17.2 torchaudio==2.2.2 --index-url https://download.pytorch.org/whl/cu121
 conda install -y -c "nvidia/label/cuda-12.1.0" cuda-toolkit
 ```
@@ -48,6 +48,9 @@ micromamba install -c conda-forge gxx=11.4.0
 # pip install -e submodules/gsplat[dev]
 pip install -e submodules/gsplat --no-build-isolation
 pip install -e submodules/simple-knn --no-build-isolation
+
+pip install git+https://github.com/nerfstudio-project/gsplat.git
+pip install git+https://github.com/camenduru/simple-knn
 ```
 
 ## Dataset Preparation

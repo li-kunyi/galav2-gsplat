@@ -46,7 +46,7 @@ class ParamGroup:
 
 class ModelParams(ParamGroup): 
     def __init__(self, parser, sentinel=False):
-        self.sh_degree = 3
+        self.sh_degree = 0
         self._source_path = ""
         self._model_path = ""
         self._images = "images"
@@ -64,6 +64,7 @@ class ModelParams(ParamGroup):
     def extract(self, args):
         g = super().extract(args)
         g.source_path = os.path.abspath(g.source_path)
+        g.im_path = os.path.join(g.source_path, "omniseg3d/instance_masks")
         try :
             g.lf_path = os.path.join(g.source_path, g.language_features_name)
         except:
@@ -112,7 +113,7 @@ class OptimizationParams(ParamGroup):
         self.lambda_cossim = 1.0
         self.lambda_ent = 0.01
 
-        self.instance_feature_dim = 3
+        self.instance_feature_dim = 6
         self.target_feature_dim = 768
         self.slot_num = 64
         self.instance_slot_dim = 32

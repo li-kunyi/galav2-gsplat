@@ -126,12 +126,13 @@ class Camera(nn.Module):
 
     def get_instance_masks(self, instance_mask_dir):
         base_dir, instance_name = '/'.join(instance_mask_dir.split('/')[:-1]), instance_mask_dir.split('/')[-1]
-        if os.path.exists(os.path.join(base_dir, 'train', instance_name, self.image_name+ '.npy')):
-            instance_mask_name = os.path.join(base_dir, 'train', instance_name, self.image_name)
-        elif os.path.exists(os.path.join(base_dir, 'test', instance_name, self.image_name+ '.npy')):
-            instance_mask_name = os.path.join(base_dir, 'test', instance_name, self.image_name)
+        image_name = os.path.splitext(self.image_name)[0]
+        if os.path.exists(os.path.join(base_dir, 'train', instance_name, image_name+ '.npy')):
+            instance_mask_name = os.path.join(base_dir, 'train', instance_name, image_name)
+        elif os.path.exists(os.path.join(base_dir, 'test', instance_name, image_name+ '.npy')):
+            instance_mask_name = os.path.join(base_dir, 'test', instance_name, image_name)
         else: 
-            instance_mask_name = os.path.join(instance_mask_dir, self.image_name)
+            instance_mask_name = os.path.join(instance_mask_dir, image_name)
 
         instance_masks = torch.from_numpy(np.load(instance_mask_name + ".npy"))
         return instance_masks.cuda()
