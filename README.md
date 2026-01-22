@@ -34,6 +34,7 @@ git clone git@github.com:JoannaCCJH/occamlgs.git --recursive
 micromamba create -n occamlgs python=3.10
 micromamba activate occamlgs
 pip install torch==2.2.2 torchvision==0.17.2 torchaudio==2.2.2 --index-url https://download.pytorch.org/whl/cu121
+conda install -y -c "nvidia/label/cuda-12.1.0" cuda-toolkit
 ```
 
 ### Project Dependencies
@@ -44,8 +45,9 @@ micromamba install -c conda-forge gxx=11.4.0
 
 ### Submodules
 ```bash
-pip install -e submodules/gsplat[dev]
-pip install -e submodules/simple-knn
+# pip install -e submodules/gsplat[dev]
+pip install -e submodules/gsplat --no-build-isolation
+pip install -e submodules/simple-knn --no-build-isolation
 ```
 
 ## Dataset Preparation

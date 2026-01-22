@@ -18,6 +18,8 @@ import json
 from utils.system_utils import mkdir_p
 from plyfile import PlyData, PlyElement
 from utils.sh_utils import RGB2SH
+import sys
+sys.path.append("/home/kunyi/work/code/GALA/submodules/simple-knn")
 from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
@@ -47,7 +49,7 @@ class GaussianModel:
         self.rotation_activation = torch.nn.functional.normalize
 
 
-    def __init__(self, sh_degree, optimizer_type="default"):
+    def __init__(self, sh_degree, optimizer_type="default", args=None):
         self.active_sh_degree = 0
         self.optimizer_type = optimizer_type
         self.max_sh_degree = sh_degree  
@@ -64,6 +66,13 @@ class GaussianModel:
         self.percent_dense = 0
         self.spatial_lr_scale = 0
         self.setup_functions()
+
+        if args is not None:
+            self.use_instance_feature = args.train_semantic
+            self.instance_feature_dim = args.instance_feature_dim
+        else:
+            self.use_instance_feature = False
+            self.instance_feature_dim = 0
 
     def capture_rgb(self):
         return (
@@ -115,6 +124,7 @@ class GaussianModel:
         self.xyz_gradient_accum = xyz_gradient_accum
         self.denom = denom
         self.optimizer.load_state_dict(opt_dict)
+
     def restore_language_features(self, model_args, training_args):
         (self.active_sh_degree, 
         self._xyz, 
@@ -165,6 +175,10 @@ class GaussianModel:
         return self.opacity_activation(self._opacity)
     
     @property
+    def get_ins_feature(self):
+        return self._ins_feature
+    
+    @property
     def get_language_feature(self):
         
         if self._language_feature is not None:
@@ -205,6 +219,8 @@ class GaussianModel:
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
+        self._ins_feature = nn.Parameter(torch.randn((self.get_xyz.shape[0], self.instance_feature_dim), dtype=torch.float, device="cuda").requires_grad_(True))
+
     def training_setup(self, training_args):
         self.percent_dense = training_args.percent_dense
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
@@ -216,7 +232,8 @@ class GaussianModel:
             {'params': [self._features_rest], 'lr': training_args.feature_lr / 20.0, "name": "f_rest"},
             {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
             {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
-            {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"}
+            {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"},
+            {'params': [self._ins_feature], 'lr': training_args.ins_feature_lr, "name": "ins_feature"}
         ]
 
         if self.optimizer_type == "default":

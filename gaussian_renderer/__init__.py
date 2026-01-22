@@ -16,7 +16,9 @@ from scene.gaussian_model import GaussianModel
 from utils.sh_utils import eval_sh
 from gsplat import rasterization
 
-def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, separate_sh = False, override_color = None, use_trained_exp=False, include_feature = False):
+def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, 
+           separate_sh = False, override_color = None, use_trained_exp=False, 
+           include_feature = False, render_instance = False):
     """
     Render the scene. 
     
@@ -84,20 +86,53 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
             height=int(viewpoint_camera.image_height),
             packed=False,
             sh_degree=sh_degree,
+            render_mode = "RGB+D",
         )
 
-    rendered_image = render_colors[0].permute(2, 0, 1)
+    rendered_image = render_colors[0, :, :, 0:3].permute(2, 0, 1)
+    median_depth = render_colors[0, :, :, 3]
     radii = info["radii"].squeeze(0) # [N,]
+    
     try:
         info["means2d"].retain_grad() # [1, N, 2]
     except:
         pass
+
+    render_ins_features = None
+    render_ins_feature = None
+    expected_depth = None
+    if render_instance:
+        ins_features = pc.get_ins_feature
+        renders, _, _ = rasterization(
+            means=means3D.detach(),  # [N, 3]
+            quats=rotations.detach(),  # [N, 4]
+            scales=scales.detach(),  # [N, 3]
+            opacities=opacity.squeeze(-1).detach(),  # [N,]
+            colors=ins_features,
+            viewmats=viewmat[None],  # [1, 4, 4]
+            Ks=K[None],  # [1, 3, 3]
+            backgrounds=bg_color[None],
+            width=int(viewpoint_camera.image_width),
+            height=int(viewpoint_camera.image_height),
+            packed=False,
+            sh_degree=sh_degree,
+            render_mode = "RGB+ED",
+        )
+
+        render_ins_feature = renders[0, :, :, 0:3].permute(2, 0, 1)
+        expected_depth = renders[0, :, :, 3]
+
     out = {
         "render": rendered_image,
+        "median_depth": median_depth,
         "viewspace_points": info["means2d"],
         "visibility_filter" : radii > 0,
         "radii": radii,
-         "info": info,
+        "info": info,
+        "render_ins_features": render_ins_features,
+        "render_normals": info["normals"],
+        "render_ins_feature": render_ins_feature,
+        "expected_depth": expected_depth,
         }
     
     return out

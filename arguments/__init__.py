@@ -89,6 +89,9 @@ class OptimizationParams(ParamGroup):
         self.opacity_lr = 0.025
         self.scaling_lr = 0.005
         self.rotation_lr = 0.001
+
+        self.ins_feature_lr = 0.005
+
         self.percent_dense = 0.01
         self.lambda_dssim = 0.2
         self.densification_interval = 100
@@ -100,7 +103,21 @@ class OptimizationParams(ParamGroup):
         self.depth_l1_weight_final = 0.01
         self.random_background = False
         self.optimizer_type = "default"
-        
+
+        self.train_semantic = True
+        self.use_geometry = True
+        self.use_instance_feature = self.train_semantic
+
+        self.lambda_normal = 0.1
+        self.lambda_cossim = 1.0
+        self.lambda_ent = 0.01
+
+        self.instance_feature_dim = 3
+        self.target_feature_dim = 768
+        self.slot_num = 64
+        self.instance_slot_dim = 32
+        self.target_slot_dim = 128
+
         super().__init__(parser, "Optimization Parameters")
 
 def get_combined_args(parser : ArgumentParser):

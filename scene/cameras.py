@@ -94,12 +94,12 @@ class Camera(nn.Module):
         self.x = x.reshape(-1, 1)
         self.y = y.reshape(-1, 1)
         
-    def get_language_feature(self, language_feature_dir, feature_level):
+    def get_target_feature(self, target_feature_dir, feature_level):
         
-        language_feature_name = os.path.join(language_feature_dir, self.image_name.split('.')[0])
+        target_feature_name = os.path.join(target_feature_dir, self.image_name.split('.')[0])
         
-        seg_map = torch.from_numpy(np.load(language_feature_name + '_s.npy'))  # seg_map: torch.Size([4, 730, 988])
-        feature_map = torch.from_numpy(np.load(language_feature_name + '_f.npy')) # feature_map: torch.Size([281, 512])
+        seg_map = torch.from_numpy(np.load(target_feature_name + '_s.npy'))  # seg_map: torch.Size([4, 730, 988])
+        feature_map = torch.from_numpy(np.load(target_feature_name + '_f.npy')) # feature_map: torch.Size([281, 512])
         seg_map = seg_map.cuda()
         feature_map = feature_map.cuda()
         
@@ -123,6 +123,18 @@ class Camera(nn.Module):
         point_feature = point_feature1.reshape(self.image_height, self.image_width, -1).permute(2, 0, 1)
        
         return point_feature, mask
+
+    def get_instance_masks(self, instance_mask_dir):
+        base_dir, instance_name = '/'.join(instance_mask_dir.split('/')[:-1]), instance_mask_dir.split('/')[-1]
+        if os.path.exists(os.path.join(base_dir, 'train', instance_name, self.image_name+ '.npy')):
+            instance_mask_name = os.path.join(base_dir, 'train', instance_name, self.image_name)
+        elif os.path.exists(os.path.join(base_dir, 'test', instance_name, self.image_name+ '.npy')):
+            instance_mask_name = os.path.join(base_dir, 'test', instance_name, self.image_name)
+        else: 
+            instance_mask_name = os.path.join(instance_mask_dir, self.image_name)
+
+        instance_masks = torch.from_numpy(np.load(instance_mask_name + ".npy"))
+        return instance_masks.cuda()
         
 class MiniCam:
     def __init__(self, width, height, fovy, fovx, znear, zfar, world_view_transform, full_proj_transform):
