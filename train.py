@@ -58,7 +58,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     optimizer_attn = None
     if opt.train_semantic:
-        attn_module = Attention(in_feat_dim=opt.instance_feature_dim + 3,  ##TODO check input feature dim
+        attn_module = Attention(in_feat_dim=3,  ##TODO check input feature dim opt.instance_feature_dim
                                 tgt_feat_dim=opt.target_feature_dim, 
                                 num_slots=opt.slot_num, 
                                 in_slot_dim=opt.instance_slot_dim, 
@@ -91,8 +91,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         bg = torch.rand((3), device="cuda") if opt.random_background else background
 
-        render_instance = False
-        if iteration > 15000:
+        render_instance = True
+        if iteration > 10_000:
             render_instance = True
         render_pkg = render(viewpoint_cam, gaussians, pipe, bg, render_instance=render_instance)
 
@@ -116,7 +116,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             median_depth_normal = median_depth_normal.permute(2, 0, 1)
             normal_loss = (1 - (rendered_normal * median_depth_normal).sum(dim=0)).mean()
             
-            
             expected_depth = render_pkg["expected_depth"]
             expected_depth_normal = None
             if expected_depth is not None:
@@ -125,15 +124,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 expected_normal_loss = (1 - (rendered_normal * expected_depth_normal).sum(dim=0)).mean()
 
                 normal_loss = 0.4 * expected_normal_loss + 0.6 * normal_loss
-
-            loss += opt.lambda_normal * normal_loss
+            
+            if iteration > 10_000:
+                loss += opt.lambda_normal * normal_loss
 
             render_pkg["median_depth_normal"] = median_depth_normal
             render_pkg["expected_depth_normal"] = expected_depth_normal
 
         # instance feature loss
-        batchsize = 4096
-        if opt.use_instance_feature:
+        batchsize = 8192
+        if opt.use_instance_feature and render_instance:
             instance_feature = render_pkg["render_ins_feature"]  # [D, H, W]
             
             # Load gt instance masks from the camera
@@ -146,18 +146,20 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             instance_feature_sample = instance_feature_flat[random_idx]
 
             # Compute contrastive clustering loss based on instance assignments
-            instance_loss = constrastive_clustering_loss(instance_feature_sample, instance_mask_flat[random_idx])
+            instance_loss = constrastive_clustering_loss(instance_feature_sample, instance_mask_flat[random_idx].detach())
             loss += opt.lambda_ins * instance_loss
 
         # slot training
-        if opt.train_semantic:
+        slot_training = (iteration > 100)
+        render_pkg["tgt_feature"] = None
+        if opt.train_semantic and slot_training:
             tgt_feature, valid_mask = viewpoint_cam.get_target_feature(dataset.lf_path, feature_level=0) # Shape gt_lan_feat: [512, H, W] Shape language_feature_mask: [1, H, W]
-            
+            render_pkg["tgt_feature"] = tgt_feature
             # Attention forward pass
             instance_feature = instance_feature.permute(1, 2, 0) # From[D=16, H=730, W=988] to [H=730, W=988, D=16]
-            rgb = image.permute(1, 2, 0)          # From [C=3, H=730, W=988] to [H=730, W=988, C=3]
-
-            feature = torch.cat([rgb, instance_feature], dim=-1)  # [H, W, C+D]
+            rgb = gt_image.permute(1, 2, 0)          # From [C=3, H=730, W=988] to [H=730, W=988, C=3]
+            # feature = torch.cat([rgb, instance_feature], dim=-1)  # [H, W, C+D]
+            feature = gt_image.permute(1, 2, 0)
 
             # Load gt instance masks from the camera
             gt_instance_masks = viewpoint_cam.get_instance_masks(instance_mask_dir=dataset.im_path) # Shape: [H, W]
@@ -186,7 +188,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         # Gaussian Update
         with torch.no_grad():
             # update slots
-            if opt.train_semantic:
+            if opt.train_semantic and slot_training:
                 attn_module.update_slots(updated_in_slots, updated_tgt_slots)
 
             # Progress bar
@@ -227,7 +229,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 gaussians.optimizer.step()
                 gaussians.optimizer.zero_grad(set_to_none = True)
                 
-                if optimizer_attn is not None:
+                if optimizer_attn is not None and slot_training:
                     optimizer_attn.step()
                     optimizer_attn.zero_grad(set_to_none = True)
 
@@ -236,7 +238,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 torch.save((gaussians.capture_rgb(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
 
             # Visualization
-            if iteration % 1000 == 0:
+            if iteration % 100 == 0:
                 visualizer(render_pkg, iteration, scene.model_path, attn_module)
 
 
@@ -244,19 +246,19 @@ def visualizer(render_pkg, iteration, out_path, attn_module):
     gt_image = render_pkg["gt_image"]
     image = render_pkg["render"]
 
-    depth = render_pkg["expected_depth"].squeeze(-1)
+    depth = render_pkg["median_depth"].squeeze()
 
     rendered_normal = render_pkg["render_normals"]
 
     expected_depth_normal = render_pkg["expected_depth_normal"]
     median_depth_normal = render_pkg["median_depth_normal"]
-    depth_normal = expected_depth_normal if expected_depth_normal is not None else median_depth_normal
 
     depth_map = apply_depth_colormap(depth[..., None], None, near_plane=0.1, far_plane=20)
     depth_map = depth_map.permute(2, 0, 1)
     
-    _depth_normal = (depth_normal + 1.) / 2.
-    _render_normal_world = (rendered_normal + 1) / 2
+    _rendered_normal = (rendered_normal + 1.) / 2.
+    _expected_depth_normal = (expected_depth_normal + 1.) / 2.
+    _median_depth_normal = (median_depth_normal + 1) / 2
 
     instance_feature = render_pkg["render_ins_feature"]  # [D, H, W]
     D, H, W = instance_feature.shape
@@ -265,25 +267,39 @@ def visualizer(render_pkg, iteration, out_path, attn_module):
     x_pca = pca.fit_transform(x.cpu().numpy())  # [H*W, 3]
     feature_vis = torch.from_numpy(x_pca).reshape(H, W, 3).permute(2, 0, 1)
     feature_vis = (feature_vis - feature_vis.min()) / (feature_vis.max() - feature_vis.min())
+  
+    # cat_feature = torch.cat([gt_image.permute(1, 2, 0) , instance_feature.permute(1, 2, 0)], dim=-1)  # [H, W, C+D]
+    cat_feature = gt_image.permute(1, 2, 0) 
+    semantic_flat = attn_module.inference(cat_feature.reshape(-1, cat_feature.shape[-1]).float())  # [H*W, D]
+    N, D = semantic_flat.shape
 
-    instance_feature = instance_feature.permute(1, 2, 0) # From[D=16, H=730, W=988] to [H=730, W=988, D=16]
-    rgb = image.permute(1, 2, 0)     
-    cat_feature = torch.cat([rgb, instance_feature], dim=-1)  # [H, W, C+D]
-    semantic_feature = attn_module.inference(cat_feature.reshape(-1, cat_feature.shape[-1]).float())  # [H*W, D]
-    semantic_feature = semantic_feature.reshape(H, W, -1)
-    x_pca = pca.fit_transform(semantic_feature.cpu().numpy())  # [H*W, 3]
-    semantic_feature_vis = torch.from_numpy(x_pca).reshape(H, W, 3).permute(2, 0, 1)
+    tgt_feature = render_pkg["tgt_feature"]
+    if tgt_feature is not None:
+        tgt_flat = tgt_feature.permute(1, 2, 0).reshape(-1, D)  
+        features = torch.cat([semantic_flat, tgt_flat], dim=0)
+    else:
+        features = semantic_flat
+
+    x_pca = pca.fit_transform(features.cpu().numpy())
+
+    semantic_feature_vis = torch.from_numpy(x_pca[:N]).reshape(H, W, 3).permute(2, 0, 1)
     semantic_feature_vis = (semantic_feature_vis - semantic_feature_vis.min()) / (semantic_feature_vis.max() - semantic_feature_vis.min())
 
-    row0 = torch.cat([gt_image, image, depth_map], dim=2)
-    row1 = torch.cat([_render_normal_world, _render_normal_world, _depth_normal], dim=2)
-    row2 = torch.cat([feature_vis, semantic_feature_vis, semantic_feature_vis], dim=2)
+    if tgt_feature is not None:
+        tgt_feature_vis = torch.from_numpy(x_pca[N:]).reshape(H, W, 3).permute(2, 0, 1)
+        tgt_feature_vis = (tgt_feature_vis - tgt_feature_vis.min()) / (tgt_feature_vis.max() - tgt_feature_vis.min())
+    else:
+        tgt_feature_vis = semantic_feature_vis
+    
+    row0 = torch.cat([gt_image, image, depth_map], dim=2).cpu()
+    row1 = torch.cat([_rendered_normal, _expected_depth_normal, _median_depth_normal], dim=2).cpu()
+    row2 = torch.cat([feature_vis, semantic_feature_vis, tgt_feature_vis], dim=2).cpu()
 
     image_to_show = torch.cat([row0, row1, row2], dim=1)
     image_to_show = torch.clamp(image_to_show, 0, 1)
     
     os.makedirs(f"{out_path}/log_images", exist_ok = True)
-    torchvision.utils.save_image(image_to_show, f"{out_path}log_images/{iteration}.jpg")
+    torchvision.utils.save_image(image_to_show, f"{out_path}/log_images/{iteration}.jpg")
 
 
 def slot_visualizer(render_pkg, iteration, out_path, attn_module):

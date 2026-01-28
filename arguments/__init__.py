@@ -106,7 +106,7 @@ class OptimizationParams(ParamGroup):
         self.use_geometry = True
         self.use_instance_feature = self.train_semantic
 
-        self.lambda_normal = 0.1
+        self.lambda_normal = 0.05
         self.lambda_cossim = 1.0
         self.lambda_ent = 0.01
         self.lambda_ins = 0.001

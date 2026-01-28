@@ -14,21 +14,23 @@ class SlotAttention(nn.Module):
 
         # Slot update
         self.gru_in = nn.GRUCell(in_slot_dim, in_slot_dim)
+        self.mlp_norm_input = nn.LayerNorm(in_slot_dim)
         self.mlp_in = nn.Sequential(
-            nn.Linear(in_slot_dim, in_slot_dim),
+            nn.Linear(in_slot_dim, 128),
             nn.ReLU(),
-            nn.Linear(in_slot_dim, in_slot_dim)
+            nn.Linear(128, in_slot_dim)
         )
 
         self.gru_tgt = nn.GRUCell(tgt_slot_dim, tgt_slot_dim)
+        self.mlp_norm_target = nn.LayerNorm(tgt_slot_dim)
+        hidden_dim = tgt_slot_dim if tgt_slot_dim > 128 else 128
         self.mlp_tgt = nn.Sequential(
-            nn.Linear(tgt_slot_dim, tgt_slot_dim),
+            nn.Linear(tgt_slot_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(tgt_slot_dim, tgt_slot_dim)
-        )
+            nn.Linear(hidden_dim, tgt_slot_dim)
+        )       
 
         self.norm_in_slots = nn.LayerNorm(in_slot_dim)
-        self.norm_tgt_slots = nn.LayerNorm(tgt_slot_dim)
 
         self.norm_input = nn.LayerNorm(in_feat_dim)
         self.norm_target = nn.LayerNorm(tgt_feat_dim)
@@ -67,8 +69,11 @@ class SlotAttention(nn.Module):
             in_slots = self.gru_in(in_updates, in_slots)
             tgt_slots = self.gru_tgt(tgt_updates, tgt_slots)
             # MLP residual
-            in_slots = in_slots + self.mlp_in(in_slots)
-            tgt_slots = tgt_slots + self.mlp_tgt(tgt_slots)
+            in_slots = in_slots + self.mlp_in(self.mlp_norm_input(in_slots))
+            tgt_slots = tgt_slots + self.mlp_tgt(self.mlp_norm_target(tgt_slots))
+            
+            in_slots = in_slots / (in_slots.norm(dim=-1, keepdim=True) + 1e-9)
+            tgt_slots = tgt_slots / (tgt_slots.norm(dim=-1, keepdim=True) + 1e-9)
 
         return in_slots, tgt_slots
     
@@ -80,8 +85,8 @@ class CrossAttention(nn.Module):
         self.norm_in_slots = nn.LayerNorm(in_slot_dim)
         self.norm_tgt_slots = nn.LayerNorm(tgt_slot_dim)
 
-        self.to_q = nn.Linear(in_feat_dim, in_slot_dim)  
-        self.to_k = nn.Linear(in_slot_dim, in_slot_dim)
+        self.to_q = nn.Linear(in_feat_dim, tgt_slot_dim)  
+        self.to_k = nn.Linear(in_slot_dim, tgt_slot_dim)
         self.to_v = nn.Linear(tgt_slot_dim, tgt_slot_dim)
 
         self.mlp = nn.Sequential(
@@ -108,12 +113,13 @@ class CrossAttention(nn.Module):
 
         # Attention logits [N, M]
         logits = torch.matmul(q, k.T) / math.sqrt(D)
-        attn = F.softmax(logits, dim=1)  # softmax over target features
+        attn = F.softmax(logits, dim=-1)  # softmax over target features
 
         # Aggregate features
-        out_flat = torch.matmul(attn, v)  # [N, D]
+        out_flat = torch.matmul(attn, v) + q # [N, D]
 
         output = self.mlp(out_flat)  
+        output = output / (output.norm(dim=-1, keepdim=True) + 1e-9)
 
         return output, attn
 
