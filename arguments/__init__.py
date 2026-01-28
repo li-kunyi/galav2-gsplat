@@ -109,6 +109,7 @@ class OptimizationParams(ParamGroup):
         self.lambda_normal = 0.1
         self.lambda_cossim = 1.0
         self.lambda_ent = 0.01
+        self.lambda_ins = 0.001
 
         self.instance_feature_dim = 6
         self.target_feature_dim = 512

@@ -55,43 +55,23 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         sh_degree = pc.active_sh_degree
 
     viewmat = viewpoint_camera.world_view_transform.transpose(0, 1) # [4, 4]
-    if False:
-        ins_features = pc.get_ins_feature
-        renders, _, _, _, _, _, _ = \
-        rasterization_2dgs(
-            means=means3D.detach(),  # [N, 3]
-            quats=rotations.detach(),  # [N, 4]
-            scales=scales.detach(),  # [N, 3]
-            opacities=opacity.squeeze(-1).detach(),  # [N,]
-            colors=ins_features,
-            viewmats=viewmat[None],  # [1, 4, 4]
-            Ks=K[None],  # [1, 3, 3]
-            width=int(viewpoint_camera.image_width),
-            height=int(viewpoint_camera.image_height),
-            packed=False,
-            sh_degree=0,
-        )
-
-        render_ins_feature = renders[0, :, :, 0:3].permute(2, 0, 1)
-        return render_ins_feature
-    else:
-        # Rasterize visible Gaussians to image, obtain their radii (on screen). 
-        render_colors, render_alphas, render_normals, surf_normals, render_distort, render_median, info = \
-        rasterization_2dgs(
-            means=means3D,  # [N, 3]
-            quats=rotations,  # [N, 4]
-            scales=scales,  # [N, 3]
-            opacities=opacity.squeeze(-1),  # [N,]
-            colors=colors[None],
-            viewmats=viewmat[None],  # [1, 4, 4]
-            Ks=K[None],  # [1, 3, 3]
-            backgrounds=bg_color[None],
-            width=int(viewpoint_camera.image_width),
-            height=int(viewpoint_camera.image_height),
-            packed=False,
-            sh_degree=sh_degree,
-            render_mode = "RGB+ED",
-        )
+    # Rasterize visible Gaussians to image, obtain their radii (on screen). 
+    render_colors, render_alphas, render_normals, surf_normals, render_distort, render_median, info = \
+    rasterization_2dgs(
+        means=means3D,  # [N, 3]
+        quats=rotations,  # [N, 4]
+        scales=scales,  # [N, 3]
+        opacities=opacity.squeeze(-1),  # [N,]
+        colors=colors[None],
+        viewmats=viewmat[None],  # [1, 4, 4]
+        Ks=K[None],  # [1, 3, 3]
+        backgrounds=bg_color[None],
+        width=int(viewpoint_camera.image_width),
+        height=int(viewpoint_camera.image_height),
+        packed=False,
+        sh_degree=sh_degree,
+        render_mode = "RGB+ED",
+    )
 
     rendered_image = render_colors[0, :, :, 0:3].permute(2, 0, 1)
     expected_depth = render_colors[:, :, :, 3]

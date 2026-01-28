@@ -128,8 +128,8 @@ class Attention(nn.Module):
             self.slot_attn = SlotAttention(in_feat_dim, tgt_feat_dim, num_slots, in_slot_dim, tgt_slot_dim, iters)
         self.cross_attn = CrossAttention(in_feat_dim, tgt_feat_dim, in_slot_dim, tgt_slot_dim)
 
-    def forward(self, in_flat, tgt_flat):
-        # Slot Attention -> update slots, get shared attn
+    def train(self, in_flat, tgt_flat):
+        # Slot Attention -> update slots
         updated_in_slots, updated_tgt_slots = self.slot_attn(in_flat, tgt_flat, self.in_slots, self.tgt_slots)
 
         # Cross-Attention
@@ -139,6 +139,15 @@ class Attention(nn.Module):
     
     def inference(self, in_flat):
         out_flat, logits = self.cross_attn(in_flat, self.in_slots, self.tgt_slots)
+        return out_flat
+    
+    def per_slot_inference(self, in_flat):
+        num_slots = self.in_slots.shape[0]
+
+        out_flat = []
+        for i in range(num_slots):
+            out, _ = self.cross_attn(in_flat, self.in_slots[i], self.tgt_slots[i])
+            out_flat.append(out)
         return out_flat
     
     def update_slots(self, in_slots, tgt_slots):
