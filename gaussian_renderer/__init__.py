@@ -17,7 +17,7 @@ from utils.sh_utils import eval_sh
 from gsplat import rasterization, rasterization_2dgs
 
 def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, 
-           override_color = None, render_instance = False):
+           override_color = None, render_rgb = True, render_instance = False, render_mode="RGB+D"):
     """
     Render the scene. 
     
@@ -55,36 +55,41 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         sh_degree = pc.active_sh_degree
 
     viewmat = viewpoint_camera.world_view_transform.transpose(0, 1) # [4, 4]
-    # Rasterize visible Gaussians to image, obtain their radii (on screen). 
-    render_colors, render_alphas, render_normals, surf_normals, render_distort, render_median, info = \
-    rasterization_2dgs(
-        means=means3D,  # [N, 3]
-        quats=rotations,  # [N, 4]
-        scales=scales,  # [N, 3]
-        opacities=opacity.squeeze(-1),  # [N,]
-        colors=colors[None],
-        viewmats=viewmat[None],  # [1, 4, 4]
-        Ks=K[None],  # [1, 3, 3]
-        backgrounds=bg_color[None],
-        width=int(viewpoint_camera.image_width),
-        height=int(viewpoint_camera.image_height),
-        packed=False,
-        sh_degree=sh_degree,
-        render_mode = "RGB+ED",
-    )
 
-    rendered_image = render_colors[0, :, :, 0:3].permute(2, 0, 1)
-    expected_depth = render_colors[:, :, :, 3]
-    median_depth = render_median[:, :, :, 0]
-    render_normals = render_normals[0].permute(2, 0, 1)
-    
-    radii = info["radii"].squeeze(0).max(dim=-1).values # [N,]
+    # Rasterize visible Gaussians to image, obtain their radii (on screen). 
+    rendered_image = None
+    depth = None
+    radii = None
+    if render_rgb:
+        render_colors, render_alphas, info = rasterization(
+                means=means3D,  # [N, 3]
+                quats=rotations,  # [N, 4]
+                scales=scales,  # [N, 3]
+                opacities=opacity.squeeze(-1),  # [N,]
+                colors=colors,
+                viewmats=viewmat[None],  # [1, 4, 4]
+                Ks=K[None],  # [1, 3, 3]
+                backgrounds=bg_color[None],
+                width=int(viewpoint_camera.image_width),
+                height=int(viewpoint_camera.image_height),
+                packed=False,
+                sh_degree=sh_degree,
+                render_mode = render_mode,
+            )
+
+        rendered_image = render_colors[0, :, :, 0:3].permute(2, 0, 1)
+        depth = render_colors[:, :, :, 3]
+
+        try:
+            info["means2d"].retain_grad() # [1, N, 2]
+        except:
+            pass
 
     render_ins_feature = None
     if render_instance:
         ins_features = pc.get_ins_feature
-        renders, _, _, _, _, _, _ = \
-        rasterization_2dgs(
+
+        renders, render_alphas, info = rasterization(
             means=means3D.detach(),  # [N, 3]
             quats=rotations.detach(),  # [N, 4]
             scales=scales.detach(),  # [N, 3]
@@ -100,21 +105,15 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
 
         render_ins_feature = renders[0, :, :, :].permute(2, 0, 1)
 
-    try:
-        info["means2d"].retain_grad() # [1, N, 2]
-    except:
-        pass
-
+    radii = info["radii"].squeeze(0).max(dim=-1).values # [N,]
     out = {
         "render": rendered_image,
-        "median_depth": median_depth,
+        "depth": depth,
         "viewspace_points": info["means2d"],
         "visibility_filter" : radii > 0,
         "radii": radii,
         "info": info,
         "render_ins_feature": render_ins_feature,
-        "render_normals": render_normals,
-        "expected_depth": expected_depth,
         }
     
     return out

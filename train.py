@@ -15,7 +15,7 @@ from random import randint
 from torch.nn import functional as F
 import torchvision
 from utils.loss_utils import l1_loss, ssim, constrastive_clustering_loss, cosine_similarity, entropy_loss
-from utils.geometry_utils import depth_to_normal
+from utils.geometry_utils import depth_to_normal, depths_to_points
 from gaussian_renderer import render
 import sys
 from scene import Scene, GaussianModel
@@ -56,20 +56,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     viewpoint_indices = list(range(len(viewpoint_stack)))
     ema_loss_for_log = 0.0
 
-    optimizer_attn = None
-    if opt.train_semantic:
-        attn_module = Attention(in_feat_dim=opt.instance_feature_dim+3,  ##TODO check input feature dim opt.instance_feature_dim
-                                tgt_feat_dim=opt.target_feature_dim, 
-                                num_slots=opt.slot_num, 
-                                in_slot_dim=opt.instance_slot_dim, 
-                                tgt_slot_dim=opt.target_slot_dim
-                                ).cuda()
-        if checkpoint:
-            attn_module.load(checkpoint)
-
-        optimizer_attn = torch.optim.Adam(attn_module.parameters(), lr=1e-3)    
-
-    progress_bar = tqdm(range(first_iter, opt.iterations), initial=first_iter, total=opt.iterations, desc="Training progress")
+    progress_bar = tqdm(range(first_iter, opt.iterations), initial=first_iter, total=opt.iterations, desc="Appearance Training")
     first_iter += 1
     for iteration in range(first_iter, opt.iterations + 1):
 
@@ -94,10 +81,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         bg = torch.rand((3), device="cuda") if opt.random_background else background
 
-        render_instance = True
-        if iteration > 10_000:
-            render_instance = True
-        render_pkg = render(viewpoint_cam, gaussians, pipe, bg, render_instance=render_instance)
+        render_pkg = render(viewpoint_cam, gaussians, pipe, bg, render_instance=False)
 
         image, viewspace_point_tensor, visibility_filter, radii = \
             render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
@@ -110,106 +94,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         ssim_value = ssim(image, gt_image)
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
 
-        # geometry loss
-        if opt.use_geometry:
-            rendered_normal = render_pkg["render_normals"]
-            median_depth = render_pkg["median_depth"]
-            
-            median_depth_normal, _ = depth_to_normal(viewpoint_cam, median_depth, world_frame=True)
-            median_depth_normal = median_depth_normal.permute(2, 0, 1)
-            normal_loss = (1 - (rendered_normal * median_depth_normal).sum(dim=0)).mean()
-            
-            expected_depth = render_pkg["expected_depth"]
-            expected_depth_normal = None
-            if expected_depth is not None:
-                expected_depth_normal, rendered_points = depth_to_normal(viewpoint_cam, expected_depth, world_frame=True)  #TODO rendered normal is in world frame or not?
-                expected_depth_normal = expected_depth_normal.permute(2, 0, 1)
-                expected_normal_loss = (1 - (rendered_normal * expected_depth_normal).sum(dim=0)).mean()
-
-                normal_loss = 0.4 * expected_normal_loss + 0.6 * normal_loss
-            
-            if iteration > 10_000:
-                loss += opt.lambda_normal * normal_loss
-
-            render_pkg["median_depth_normal"] = median_depth_normal
-            render_pkg["expected_depth_normal"] = expected_depth_normal
-
-        # instance feature loss
-        batchsize = 8192
-        if opt.use_instance_feature and render_instance:
-            instance_feature = render_pkg["render_ins_feature"]  # [D, H, W]
-            
-            # Load gt instance masks from the camera
-            gt_instance_masks = viewpoint_cam.get_instance_masks(instance_mask_dir=dataset.im_path)
-            instance_mask_flat = gt_instance_masks.cuda().long().flatten() # Flatten
-
-            # Sample a random set of pixels from the image for contrastive learning
-            random_idx = torch.randint(0, viewpoint_cam.image_width * viewpoint_cam.image_height, [batchsize])
-            instance_feature_flat = instance_feature.reshape(opt.instance_feature_dim, -1).permute(1, 0) # Reshape instance features to (num_pixels, feature_dim)
-            instance_feature_sample = instance_feature_flat[random_idx]
-
-            # Compute contrastive clustering loss based on instance assignments
-            instance_loss = constrastive_clustering_loss(instance_feature_sample, instance_mask_flat[random_idx].detach())
-            loss += opt.lambda_ins * instance_loss
-
-        # slot training
-        slot_training = (iteration >= 10000)
-        render_pkg["tgt_feature"] = None
-        if opt.train_semantic and slot_training:
-            tgt_feature, valid_mask = viewpoint_cam.get_target_feature(dataset.lf_path, feature_level=0) # Shape gt_lan_feat: [512, H, W] Shape language_feature_mask: [1, H, W]
-            # tgt_feature = gt_image
-            render_pkg["tgt_feature"] = tgt_feature
-
-            # Attention forward pass
-            instance_feature = instance_feature.permute(1, 2, 0) # From[D=16, H=730, W=988] to [H=730, W=988, D=16]
-            rgb = gt_image.permute(1, 2, 0)          # From [C=3, H=730, W=988] to [H=730, W=988, C=3]
-            feature = torch.cat([rgb, instance_feature], dim=-1)  # [H, W, C+D]
-            # feature = instance_feature
-            # feature = gt_image.permute(1, 2, 0)
-
-            # Load gt instance masks from the camera
-            gt_instance_masks = viewpoint_cam.get_instance_masks(instance_mask_dir=dataset.im_path) # Shape: [H, W]
-            instance_mask_flat = gt_instance_masks.cuda().long().flatten()                          # Shape: [H*W]
-
-            # Sample a random set of pixels from the image for contrastive learning
-            random_idx = torch.randint(0, viewpoint_cam.image_width * viewpoint_cam.image_height, [batchsize])     # Shape: [batchsize]
-
-            tgt_feature_flat = tgt_feature.reshape(tgt_feature.shape[0], -1).permute(1, 0) # Reshape lang features to (num_pixels, feature_dim)
-            tgt_feature_sample = tgt_feature_flat[random_idx]
-
-            feature_sample = feature.reshape(-1, feature.shape[-1])[random_idx]  # [1, H*W, C+D]
-
-            out_feature, updated_in_slots, updated_tgt_slots, attn_weights = attn_module.train(feature_sample.float(), tgt_feature_sample.float())
-
-            # slots_in = F.normalize(updated_in_slots, dim=-1)
-            # sim = torch.matmul(slots_in, slots_in.T)
-            # sim_loss1 = ((sim - torch.eye(sim.size(0), device=sim.device))**2).mean()
-
-            # slots_tgt = F.normalize(updated_tgt_slots, dim=-1)
-            # sim = torch.matmul(slots_tgt, slots_tgt.T)
-            # sim_loss2 = ((sim - torch.eye(sim.size(0), device=sim.device))**2).mean()
-
-            # loss += 0.1 * (sim_loss1 + sim_loss2)
-
-            cossim_loss = cosine_similarity(out_feature, tgt_feature_sample)  
-            loss += opt.lambda_cossim * cossim_loss
-    
-            ent_loss = entropy_loss(attn_weights, eps=1e-8, reduction='mean')
-            
-            loss += opt.lambda_ent * ent_loss
-
-            # print(sim_loss1)
-
         loss.backward()
 
         iter_end.record()
 
         # Gaussian Update
         with torch.no_grad():
-            # update slots
-            if opt.train_semantic and slot_training:
-                attn_module.update_slots(updated_in_slots, updated_tgt_slots)
-
             # Progress bar
             ema_loss_for_log = loss.item()
 
@@ -238,48 +128,227 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                     gaussians.reset_opacity()
 
-            # Slot attention densification
-            if opt.train_semantic and iteration > 15000:
-                if iteration % 5000 == 0:
-                    pass  ##TODO slot attention densification
-
             # Optimizer step
             if iteration < opt.iterations:
                 gaussians.optimizer.step()
                 gaussians.optimizer.zero_grad(set_to_none = True)
                 
-                if optimizer_attn is not None and slot_training:
-                    optimizer_attn.step()
-                    optimizer_attn.zero_grad(set_to_none = True)
-
             if (iteration in checkpoint_iterations):
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 os.makedirs(scene.model_path + "/ckpt" + str(iteration), exist_ok=True)
                 torch.save((gaussians.capture_feature(), iteration), scene.model_path + "/ckpt" + str(iteration) + "/gaussians.pth")
-                attn_module.save(scene.model_path + "/ckpt" + str(iteration))
 
             # Visualization
             if iteration % 100 == 0:
-                visualizer(render_pkg, iteration, scene.model_path, attn_module)
+                depth = render_pkg["depth"]
+                depth_normal, _ = depth_to_normal(viewpoint_cam, depth, world_frame=True)
+                render_pkg["depth_normals"] = depth_normal
+                visualizer_rgb(render_pkg, iteration, scene.model_path)
+
+    print("Gaussian Appearance Training Completed!")
 
 
-def visualizer(render_pkg, iteration, out_path, attn_module):
+def training_semantic(dataset, opt, pipe, checkpoint_iterations, checkpoint):
+    first_iter = 0
+    tb_writer = prepare_output_and_logger(dataset)
+    gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type, opt)
+    scene = Scene(dataset, gaussians)
+
+    (model_params, first_iter) = torch.load(f"{checkpoint}/gaussians.pth")
+    gaussians.restore_feature(model_params, opt, set_optimizer=False)
+    # only optimize instance feature
+    gaussians.training_setup_semantic(opt)
+
+    bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
+    background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+
+    iter_start = torch.cuda.Event(enable_timing = True)
+    iter_end = torch.cuda.Event(enable_timing = True)
+
+    viewpoint_stack = scene.getTrainCameras().copy()
+    ema_loss_for_log = 0.0
+
+    use_rgb = True
+    optimizer_attn = None
+    if opt.train_semantic:
+        # instance feature to semantics
+        in_feat_dim = opt.instance_feature_dim + 3 if use_rgb else opt.instance_feature_dim
+        
+        attn_module = Attention(in_feat_dim=in_feat_dim,
+                                tgt_feat_dim=opt.target_feature_dim, 
+                                num_slots=opt.slot_num, 
+                                in_slot_dim=opt.instance_slot_dim, 
+                                tgt_slot_dim=opt.target_slot_dim
+                                ).cuda()
+        if checkpoint and os.path.exists(f"{checkpoint}/attn_module.pth"):
+            attn_module.load(checkpoint)
+
+        optimizer_attn = torch.optim.Adam(attn_module.parameters(), lr=1e-3)    
+
+    first_iter = 1
+    total_iterations = opt.semantic_iterations
+    progress_bar = tqdm(range(first_iter, total_iterations + 1), initial=first_iter, total=total_iterations, desc="Training progress")
+    for iteration in range(first_iter, total_iterations + 1):
+
+        iter_start.record()
+
+        # Pick a random Camera
+        if not viewpoint_stack:
+            viewpoint_stack = scene.getTrainCameras().copy()
+            viewpoint_indices = list(range(len(viewpoint_stack)))
+        rand_idx = randint(0, len(viewpoint_stack) - 1)
+        viewpoint_cam = viewpoint_stack.pop(rand_idx)
+
+        bg = torch.rand((3), device="cuda") if opt.random_background else background
+
+        render_pkg = render(viewpoint_cam, gaussians, pipe, bg, render_instance=True, render_rgb=False)
+
+        gt_image = viewpoint_cam.original_image.cuda()
+        render_pkg["gt_image"] = gt_image
+
+        if use_rgb:
+            with torch.no_grad():
+                render_pkg_rgb = render(viewpoint_cam, gaussians, pipe, bg, render_instance=False, render_rgb=True)
+
+                image = render_pkg_rgb["render"]
+
+                # geometry
+                depth = render_pkg_rgb["depth"]
+                # pts_world = depths_to_points(viewpoint_cam, depth, world_frame=True)
+
+                render_pkg["render"] = image
+                render_pkg["depth"] = depth
+
+        # instance feature loss
+        batchsize = 8192
+
+        instance_feature = render_pkg["render_ins_feature"]  # [D, H, W]
+        
+        # Load gt instance masks from the camera
+        gt_instance_masks = viewpoint_cam.get_instance_masks(instance_mask_dir=dataset.im_path)
+        instance_mask_flat = gt_instance_masks.cuda().long().flatten() # Flatten
+
+        # Sample a random set of pixels from the image for contrastive learning
+        random_idx = torch.randint(0, viewpoint_cam.image_width * viewpoint_cam.image_height, [batchsize])
+        instance_feature_flat = instance_feature.reshape(opt.instance_feature_dim, -1).permute(1, 0) # Reshape instance features to (num_pixels, feature_dim)
+        instance_feature_sample = instance_feature_flat[random_idx]
+
+        # Compute contrastive clustering loss based on instance assignments
+        loss = opt.lambda_ins * constrastive_clustering_loss(instance_feature_sample, instance_mask_flat[random_idx].detach())
+
+        # slot training
+        slot_training = (iteration >= 1000)
+        render_pkg["tgt_feature"] = None
+        if opt.train_semantic and slot_training:
+            tgt_feature, valid_mask = viewpoint_cam.get_target_feature(dataset.lf_path, feature_level=0) # Shape gt_lan_feat: [512, H, W] Shape language_feature_mask: [1, H, W]
+            # tgt_feature = gt_image
+            render_pkg["tgt_feature"] = tgt_feature
+
+            # Attention forward pass
+            instance_feature = instance_feature.permute(1, 2, 0) # From[D=16, H=730, W=988] to [H=730, W=988, D=16]
+
+            if use_rgb:
+                rgb = image.permute(1, 2, 0)          # From [C=3, H=730, W=988] to [H=730, W=988, C=3]
+                feature = torch.cat([rgb, instance_feature], dim=-1)  # [H, W, C+D]
+            else:
+                feature = instance_feature  # [H, W, D]
+
+            # Load gt instance masks from the camera
+            gt_instance_masks = viewpoint_cam.get_instance_masks(instance_mask_dir=dataset.im_path) # Shape: [H, W]
+            instance_mask_flat = gt_instance_masks.cuda().long().flatten()                          # Shape: [H*W]
+
+            # Sample a random set of pixels from the image for contrastive learning
+            random_idx = torch.randint(0, viewpoint_cam.image_width * viewpoint_cam.image_height, [batchsize])     # Shape: [batchsize]
+
+            tgt_feature_flat = tgt_feature.reshape(tgt_feature.shape[0], -1).permute(1, 0) # Reshape lang features to (num_pixels, feature_dim)
+            tgt_feature_sample = tgt_feature_flat[random_idx]
+
+            feature_sample = feature.reshape(-1, feature.shape[-1])[random_idx]  # [1, H*W, C+D]
+
+            out_feature, updated_in_slots, updated_tgt_slots, attn_weights = attn_module.train(feature_sample.float(), tgt_feature_sample.float())
+
+            cossim_loss = cosine_similarity(out_feature, tgt_feature_sample)  
+            loss += opt.lambda_cossim * cossim_loss
+    
+            ent_loss = entropy_loss(attn_weights, eps=1e-8, reduction='mean')
+            
+            loss += opt.lambda_ent * ent_loss
+
+        loss.backward()
+
+        iter_end.record()
+
+        # Gaussian Update
+        with torch.no_grad():
+            # Optimizer step
+            gaussians.optimizer.step()
+            if optimizer_attn is not None and slot_training:
+                optimizer_attn.step()
+
+            gaussians.optimizer.zero_grad(set_to_none = True)
+            optimizer_attn.zero_grad(set_to_none = True)
+
+            # update slots
+            if opt.train_semantic and slot_training:
+                attn_module.update_slots(updated_in_slots, updated_tgt_slots)
+
+            # Slot attention densification TODO
+            if opt.train_semantic and iteration > 15000:
+                if iteration % 5000 == 0:
+                    pass 
+
+            # Log and Save
+            ema_loss_for_log = loss.item()
+
+            if iteration % 10 == 0:
+                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}"})
+                progress_bar.update(10)
+            if iteration == opt.iterations:
+                progress_bar.close()
+
+            if (iteration in checkpoint_iterations):
+                print("\n[ITER {}] Saving Checkpoint".format(iteration))
+                os.makedirs(scene.model_path + "/ckpt_semantic" + str(iteration), exist_ok=True)
+                torch.save((gaussians.capture_feature(), iteration), scene.model_path + "/ckpt_semantic" + str(iteration) + "/gaussians.pth")
+                attn_module.save(scene.model_path + "/ckpt_semantic" + str(iteration))
+
+            # Visualization
+            if iteration % 100 == 0:
+                visualizer_semantic(render_pkg, iteration, scene.model_path, attn_module, use_rgb=use_rgb)
+
+    print("Gaussian Semantic Training Completed!")
+
+
+def visualizer_rgb(render_pkg, iteration, out_path):
     gt_image = render_pkg["gt_image"]
     image = render_pkg["render"]
-
-    depth = render_pkg["median_depth"].squeeze()
-
-    rendered_normal = render_pkg["render_normals"]
-
-    expected_depth_normal = render_pkg["expected_depth_normal"]
-    median_depth_normal = render_pkg["median_depth_normal"]
+    depth = render_pkg["depth"].squeeze()
+    depth_normal = render_pkg["depth_normals"].permute(2, 0, 1)
 
     depth_map = apply_depth_colormap(depth[..., None], None, near_plane=0.1, far_plane=20)
     depth_map = depth_map.permute(2, 0, 1)
     
-    _rendered_normal = (rendered_normal + 1.) / 2.
-    _expected_depth_normal = (expected_depth_normal + 1.) / 2.
-    _median_depth_normal = (median_depth_normal + 1) / 2
+    normal_map = (depth_normal + 1.) / 2.
+    
+    row0 = torch.cat([gt_image, image], dim=2).cpu()
+    row1 = torch.cat([depth_map, normal_map], dim=2).cpu()
+
+    # image_to_show = torch.cat([row0, row1, row2], dim=1)
+    image_to_show = torch.cat([row0, row1], dim=1)
+    image_to_show = torch.clamp(image_to_show, 0, 1)
+    
+    os.makedirs(f"{out_path}/log_images/rgb", exist_ok = True)
+    torchvision.utils.save_image(image_to_show, f"{out_path}/log_images/rgb/{iteration}.jpg")
+
+
+def visualizer_semantic(render_pkg, iteration, out_path, attn_module, use_rgb=False):
+    gt_image = render_pkg["gt_image"]
+    image = render_pkg["render"] if render_pkg["render"] is not None else torch.zeros_like(gt_image).to(gt_image.device)
+
+    depth = render_pkg["depth"].squeeze() if render_pkg["depth"] is not None else torch.zeros_like(gt_image[0, :, :]).to(gt_image.device)
+
+    depth_map = apply_depth_colormap(depth[..., None], None, near_plane=0.1, far_plane=20)
+    depth_map = depth_map.permute(2, 0, 1)
 
     instance_feature = render_pkg["render_ins_feature"]  # [D, H, W]
     D, H, W = instance_feature.shape
@@ -288,10 +357,11 @@ def visualizer(render_pkg, iteration, out_path, attn_module):
     x_pca = pca.fit_transform(x.cpu().numpy())  # [H*W, 3]
     feature_vis = torch.from_numpy(x_pca).reshape(H, W, 3).permute(2, 0, 1)
     feature_vis = (feature_vis - feature_vis.min()) / (feature_vis.max() - feature_vis.min())
-  
-    cat_feature = torch.cat([gt_image.permute(1, 2, 0), instance_feature.permute(1, 2, 0)], dim=-1)  # [H, W, C+D]
-    # cat_feature = instance_feature.permute(1, 2, 0) 
-    # cat_feature = gt_image.permute(1, 2, 0) 
+
+    if use_rgb:
+        cat_feature = torch.cat([image.permute(1, 2, 0), instance_feature.permute(1, 2, 0)], dim=-1)  # [H, W, C+D]
+    else:
+        cat_feature = instance_feature.permute(1, 2, 0)  # [H, W, D]
 
     semantic_flat = attn_module.inference(cat_feature.reshape(-1, cat_feature.shape[-1]).float())  # [H*W, D]
     N, D = semantic_flat.shape
@@ -312,17 +382,17 @@ def visualizer(render_pkg, iteration, out_path, attn_module):
         tgt_feature_vis = torch.from_numpy(x_pca[N:]).reshape(H, W, 3).permute(2, 0, 1)
         tgt_feature_vis = (tgt_feature_vis - tgt_feature_vis.min()) / (tgt_feature_vis.max() - tgt_feature_vis.min())
     else:
-        tgt_feature_vis = semantic_feature_vis
+        tgt_feature_vis = torch.zeros_like(semantic_feature_vis).to(semantic_feature_vis.device)
     
     row0 = torch.cat([gt_image, image, depth_map], dim=2).cpu()
-    row1 = torch.cat([_rendered_normal, _expected_depth_normal, _median_depth_normal], dim=2).cpu()
-    row2 = torch.cat([feature_vis, semantic_feature_vis, tgt_feature_vis], dim=2).cpu()
+    row1 = torch.cat([feature_vis, semantic_feature_vis, tgt_feature_vis], dim=2).cpu()
 
-    image_to_show = torch.cat([row0, row1, row2], dim=1)
+    # image_to_show = torch.cat([row0, row1, row2], dim=1)
+    image_to_show = torch.cat([row0, row1], dim=1)
     image_to_show = torch.clamp(image_to_show, 0, 1)
     
-    os.makedirs(f"{out_path}/log_images", exist_ok = True)
-    torchvision.utils.save_image(image_to_show, f"{out_path}/log_images/{iteration}.jpg")
+    os.makedirs(f"{out_path}/log_images/semantic", exist_ok = True)
+    torchvision.utils.save_image(image_to_show, f"{out_path}/log_images/semantic/{iteration}.jpg")
 
 
 def slot_visualizer(render_pkg, iteration, out_path, attn_module):
@@ -422,7 +492,7 @@ if __name__ == "__main__":
     parser.add_argument('--debug_from', type=int, default=-1)
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
     parser.add_argument("--test_iterations", nargs="+", type=int, default=[7_000, 30_000])
-    parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 30_000])
+    parser.add_argument("--save_iterations", nargs="+", type=int, default=[30_000])
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[10_000, 15_000, 30_000])
     parser.add_argument("--ckpt_path", type=str, default = None)
@@ -433,4 +503,7 @@ if __name__ == "__main__":
     safe_state(args.quiet)
     
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
-    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.ckpt_path, args.debug_from)
+    # training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.ckpt_path, args.debug_from)
+    dataset_args = lp.extract(args)
+    ckpt_path = f"{dataset_args.model_path}/ckpt30000"
+    training_semantic(dataset_args, op.extract(args), pp.extract(args), args.checkpoint_iterations, ckpt_path)

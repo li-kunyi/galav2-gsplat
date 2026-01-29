@@ -142,7 +142,7 @@ class GaussianModel:
         self.denom = denom
         self.optimizer.load_state_dict(opt_dict)
 
-    def restore_feature(self, model_args, training_args):
+    def restore_feature(self, model_args, training_args, set_optimizer=True):
         (self.active_sh_degree, 
         self._xyz, 
         self._features_dc, 
@@ -156,10 +156,13 @@ class GaussianModel:
         denom,
         opt_dict, 
         self.spatial_lr_scale) = model_args
-        self.training_setup(training_args)
+        
         self.xyz_gradient_accum = xyz_gradient_accum
         self.denom = denom
-        self.optimizer.load_state_dict(opt_dict)
+
+        if set_optimizer:
+            self.training_setup(training_args)
+            self.optimizer.load_state_dict(opt_dict)
 
     def restore_language_features(self, model_args, training_args):
         (self.active_sh_degree, 
@@ -286,6 +289,13 @@ class GaussianModel:
                                                     lr_final=training_args.position_lr_final*self.spatial_lr_scale,
                                                     lr_delay_mult=training_args.position_lr_delay_mult,
                                                     max_steps=training_args.position_lr_max_steps)
+
+    def training_setup_semantic(self, training_args):
+        l = [
+            {'params': [self._ins_feature], 'lr': training_args.ins_feature_lr, "name": "ins_feature"}
+        ]
+
+        self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
 
     def update_learning_rate(self, iteration):
         ''' Learning rate scheduling per step '''

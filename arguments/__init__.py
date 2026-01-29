@@ -103,6 +103,7 @@ class OptimizationParams(ParamGroup):
         self.optimizer_type = "default"
 
         self.train_semantic = True
+        self.semantic_iterations = 20_000
         self.use_geometry = True
         self.use_instance_feature = self.train_semantic
 
