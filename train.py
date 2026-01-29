@@ -12,7 +12,7 @@
 import os
 import torch
 from random import randint
-
+from torch.nn import functional as F
 import torchvision
 from utils.loss_utils import l1_loss, ssim, constrastive_clustering_loss, cosine_similarity, entropy_loss
 from utils.geometry_utils import depth_to_normal
@@ -43,8 +43,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
     if checkpoint:
-        (model_params, first_iter) = torch.load(checkpoint)
-        gaussians.restore_rgb(model_params, opt)
+        (model_params, first_iter) = torch.load(f"{checkpoint}/gaussians.pth")
+        gaussians.restore_feature(model_params, opt)
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -58,15 +58,18 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     optimizer_attn = None
     if opt.train_semantic:
-        attn_module = Attention(in_feat_dim=3,  ##TODO check input feature dim opt.instance_feature_dim
+        attn_module = Attention(in_feat_dim=opt.instance_feature_dim+3,  ##TODO check input feature dim opt.instance_feature_dim
                                 tgt_feat_dim=opt.target_feature_dim, 
                                 num_slots=opt.slot_num, 
                                 in_slot_dim=opt.instance_slot_dim, 
                                 tgt_slot_dim=opt.target_slot_dim
                                 ).cuda()
+        if checkpoint:
+            attn_module.load(checkpoint)
+
         optimizer_attn = torch.optim.Adam(attn_module.parameters(), lr=1e-3)    
 
-    progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
+    progress_bar = tqdm(range(first_iter, opt.iterations), initial=first_iter, total=opt.iterations, desc="Training progress")
     first_iter += 1
     for iteration in range(first_iter, opt.iterations + 1):
 
@@ -150,16 +153,19 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             loss += opt.lambda_ins * instance_loss
 
         # slot training
-        slot_training = (iteration > 100)
+        slot_training = (iteration >= 10000)
         render_pkg["tgt_feature"] = None
         if opt.train_semantic and slot_training:
             tgt_feature, valid_mask = viewpoint_cam.get_target_feature(dataset.lf_path, feature_level=0) # Shape gt_lan_feat: [512, H, W] Shape language_feature_mask: [1, H, W]
+            # tgt_feature = gt_image
             render_pkg["tgt_feature"] = tgt_feature
+
             # Attention forward pass
             instance_feature = instance_feature.permute(1, 2, 0) # From[D=16, H=730, W=988] to [H=730, W=988, D=16]
             rgb = gt_image.permute(1, 2, 0)          # From [C=3, H=730, W=988] to [H=730, W=988, C=3]
-            # feature = torch.cat([rgb, instance_feature], dim=-1)  # [H, W, C+D]
-            feature = gt_image.permute(1, 2, 0)
+            feature = torch.cat([rgb, instance_feature], dim=-1)  # [H, W, C+D]
+            # feature = instance_feature
+            # feature = gt_image.permute(1, 2, 0)
 
             # Load gt instance masks from the camera
             gt_instance_masks = viewpoint_cam.get_instance_masks(instance_mask_dir=dataset.im_path) # Shape: [H, W]
@@ -175,11 +181,24 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
             out_feature, updated_in_slots, updated_tgt_slots, attn_weights = attn_module.train(feature_sample.float(), tgt_feature_sample.float())
 
+            # slots_in = F.normalize(updated_in_slots, dim=-1)
+            # sim = torch.matmul(slots_in, slots_in.T)
+            # sim_loss1 = ((sim - torch.eye(sim.size(0), device=sim.device))**2).mean()
+
+            # slots_tgt = F.normalize(updated_tgt_slots, dim=-1)
+            # sim = torch.matmul(slots_tgt, slots_tgt.T)
+            # sim_loss2 = ((sim - torch.eye(sim.size(0), device=sim.device))**2).mean()
+
+            # loss += 0.1 * (sim_loss1 + sim_loss2)
+
             cossim_loss = cosine_similarity(out_feature, tgt_feature_sample)  
             loss += opt.lambda_cossim * cossim_loss
     
-            ent_loss = opt.lambda_ent * entropy_loss(attn_weights, eps=1e-8, reduction='mean')
-            loss += ent_loss
+            ent_loss = entropy_loss(attn_weights, eps=1e-8, reduction='mean')
+            
+            loss += opt.lambda_ent * ent_loss
+
+            # print(sim_loss1)
 
         loss.backward()
 
@@ -235,7 +254,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
             if (iteration in checkpoint_iterations):
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
-                torch.save((gaussians.capture_rgb(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
+                os.makedirs(scene.model_path + "/ckpt" + str(iteration), exist_ok=True)
+                torch.save((gaussians.capture_feature(), iteration), scene.model_path + "/ckpt" + str(iteration) + "/gaussians.pth")
+                attn_module.save(scene.model_path + "/ckpt" + str(iteration))
 
             # Visualization
             if iteration % 100 == 0:
@@ -268,8 +289,10 @@ def visualizer(render_pkg, iteration, out_path, attn_module):
     feature_vis = torch.from_numpy(x_pca).reshape(H, W, 3).permute(2, 0, 1)
     feature_vis = (feature_vis - feature_vis.min()) / (feature_vis.max() - feature_vis.min())
   
-    # cat_feature = torch.cat([gt_image.permute(1, 2, 0) , instance_feature.permute(1, 2, 0)], dim=-1)  # [H, W, C+D]
-    cat_feature = gt_image.permute(1, 2, 0) 
+    cat_feature = torch.cat([gt_image.permute(1, 2, 0), instance_feature.permute(1, 2, 0)], dim=-1)  # [H, W, C+D]
+    # cat_feature = instance_feature.permute(1, 2, 0) 
+    # cat_feature = gt_image.permute(1, 2, 0) 
+
     semantic_flat = attn_module.inference(cat_feature.reshape(-1, cat_feature.shape[-1]).float())  # [H*W, D]
     N, D = semantic_flat.shape
 
@@ -401,8 +424,8 @@ if __name__ == "__main__":
     parser.add_argument("--test_iterations", nargs="+", type=int, default=[7_000, 30_000])
     parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 30_000])
     parser.add_argument("--quiet", action="store_true")
-    parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[7_000, 30_000])
-    parser.add_argument("--start_checkpoint", type=str, default = None)
+    parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[10_000, 15_000, 30_000])
+    parser.add_argument("--ckpt_path", type=str, default = None)
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
 
@@ -410,4 +433,4 @@ if __name__ == "__main__":
     safe_state(args.quiet)
     
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
-    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from)
+    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.ckpt_path, args.debug_from)

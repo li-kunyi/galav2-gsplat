@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+import os
 
 
 class SlotAttention(nn.Module):
@@ -59,7 +60,7 @@ class SlotAttention(nn.Module):
 
             # Attention logits [N, M]
             logits = torch.matmul(in_q, in_k.T) / math.sqrt(D)
-            attn = F.softmax(logits, dim=0)  # softmax over slots  TODO: check dmension
+            attn = F.softmax(logits, dim=0)  # softmax over slots
 
             # Aggregate features
             in_updates = torch.matmul(attn, in_v)  # [N, D]
@@ -72,10 +73,10 @@ class SlotAttention(nn.Module):
             in_slots = in_slots + self.mlp_in(self.mlp_norm_input(in_slots))
             tgt_slots = tgt_slots + self.mlp_tgt(self.mlp_norm_target(tgt_slots))
             
-            in_slots = in_slots / (in_slots.norm(dim=-1, keepdim=True) + 1e-9)
-            tgt_slots = tgt_slots / (tgt_slots.norm(dim=-1, keepdim=True) + 1e-9)
+            # in_slots = in_slots / (in_slots.norm(dim=-1, keepdim=True) + 1e-9)
+            # tgt_slots = tgt_slots / (tgt_slots.norm(dim=-1, keepdim=True) + 1e-9)
 
-        return in_slots, tgt_slots
+        return in_slots, tgt_slots, attn
     
     
 class CrossAttention(nn.Module):
@@ -130,18 +131,25 @@ class Attention(nn.Module):
         self.in_slots = torch.randn(num_slots, in_slot_dim, requires_grad=True, device='cuda:0')
         self.tgt_slots = torch.randn(num_slots, tgt_slot_dim, requires_grad=True, device='cuda:0')
 
+        # self.in_slots = nn.Parameter(torch.randn(num_slots, in_slot_dim, requires_grad=True, device='cuda:0'))
+        # self.tgt_slots = nn.Parameter(torch.randn(num_slots, tgt_slot_dim, requires_grad=True, device='cuda:0'))
+
         if train:
             self.slot_attn = SlotAttention(in_feat_dim, tgt_feat_dim, num_slots, in_slot_dim, tgt_slot_dim, iters)
+        else:
+            self.slot_attn = None
         self.cross_attn = CrossAttention(in_feat_dim, tgt_feat_dim, in_slot_dim, tgt_slot_dim)
 
     def train(self, in_flat, tgt_flat):
         # Slot Attention -> update slots
-        updated_in_slots, updated_tgt_slots = self.slot_attn(in_flat, tgt_flat, self.in_slots, self.tgt_slots)
+        updated_in_slots, updated_tgt_slots, slot_logits = self.slot_attn(in_flat, tgt_flat, self.in_slots, self.tgt_slots)
 
         # Cross-Attention
         out_flat, logits = self.cross_attn(in_flat, updated_in_slots, updated_tgt_slots)
-
         return out_flat, updated_in_slots, updated_tgt_slots, logits
+
+        # out_flat, logits = self.cross_attn(in_flat, self.in_slots, self.tgt_slots)
+        # return out_flat, self.in_slots, self.tgt_slots, logits
     
     def inference(self, in_flat):
         out_flat, logits = self.cross_attn(in_flat, self.in_slots, self.tgt_slots)
@@ -163,3 +171,25 @@ class Attention(nn.Module):
     def densification_and_prune(self, feats, th=0.7):
         with torch.no_grad():
             pass
+
+    def save(self, path):
+        os.makedirs(path, exist_ok=True)
+
+        ckpt = {
+            "model_state": self.state_dict(),
+            "in_slots": self.in_slots.detach().cpu(),
+            "tgt_slots": self.tgt_slots.detach().cpu(),
+        }
+
+        torch.save(ckpt, os.path.join(path, "attn_module.pth"))
+
+    def load(self, path, map_location="cpu", device="cuda:0"):
+        ckpt = torch.load(
+            os.path.join(path, "attn_module.pth"),
+            map_location=map_location
+        )
+
+        self.load_state_dict(ckpt["model_state"], strict=True)
+
+        self.in_slots = ckpt["in_slots"].to(device).detach().requires_grad_(True)
+        self.tgt_slots = ckpt["tgt_slots"].to(device).detach().requires_grad_(True)
