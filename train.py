@@ -316,6 +316,9 @@ def training_semantic(dataset, opt, pipe, checkpoint_iterations, checkpoint):
             if iteration % 100 == 0:
                 visualizer_semantic(render_pkg, iteration, scene.model_path, attn_module, use_rgb=use_rgb)
 
+            if iteration % 1000 == 0:
+                visualizer_slot(render_pkg, iteration, scene.model_path, attn_module, use_rgb=use_rgb)
+
     print("Gaussian Semantic Training Completed!")
 
 
@@ -395,31 +398,33 @@ def visualizer_semantic(render_pkg, iteration, out_path, attn_module, use_rgb=Fa
     torchvision.utils.save_image(image_to_show, f"{out_path}/log_images/semantic/{iteration}.jpg")
 
 
-def slot_visualizer(render_pkg, iteration, out_path, attn_module):
-    os.makedirs(f"{out_path}/slot_visualization/{iteration}", exist_ok = True)
-
+def visualizer_slot(render_pkg, iteration, out_path, attn_module, use_rgb=False):
     gt_image = render_pkg["gt_image"]
-    image = render_pkg["render"]
+    image = render_pkg["render"].permute(1, 2, 0)
     instance_feature = render_pkg["render_ins_feature"]  # [D, H, W]
-
-    D, H, W = instance_feature.shape
-
     instance_feature = instance_feature.permute(1, 2, 0) # From[D=16, H=730, W=988] to [H=730, W=988, D=16]
-    rgb = image.permute(1, 2, 0)     
-    cat_feature = torch.cat([rgb, instance_feature], dim=-1)  # [H, W, C+D]
-    semantic_features = attn_module.per_slot_inference(cat_feature.reshape(-1, cat_feature.shape[-1]).float())  # [H*W, D]
-    
-    num_slots = len(semantic_features)
+
+    H, W, D = instance_feature.shape
+
+    if use_rgb:
+        cat_feature = torch.cat([image, instance_feature], dim=-1)  # [H, W, C+D]
+    else:
+        cat_feature = instance_feature  # [H, W, D]
+
+    slots, _ = attn_module.get_slots()
+    num_slots = slots.shape[0]
+    os.makedirs(f"{out_path}/log_images/slot_visualization/{iteration}/", exist_ok = True)
     for i in range(num_slots):
-        feature = semantic_features[i].reshape(H, W, -1)
+        ##TODO also visualize the attention heatmap
+        feature = attn_module.per_slot_inference(cat_feature.reshape(-1, cat_feature.shape[-1]).float(), i)  # [H*W, D]
         pca = PCA(n_components=3)
         x_pca = pca.fit_transform(feature.cpu().numpy())  # [H*W, 3]
-        feature_vis = torch.from_numpy(x_pca).reshape(H, W, 3).permute(2, 0, 1)
+        feature_vis = torch.from_numpy(x_pca).reshape(H, W, 3).permute(2, 0, 1).to(gt_image.device)
         feature_vis = (feature_vis - feature_vis.min()) / (feature_vis.max() - feature_vis.min())
         masked_rgb = gt_image * feature_vis
 
-        torchvision.utils.save_image(feature_vis, f"{out_path}/slot_visualization/{iteration}/slot_{i}_feature.jpg")
-        torchvision.utils.save_image(masked_rgb, f"{out_path}/slot_visualization/{iteration}/slot_{i}_masked_rgb.jpg")
+        torchvision.utils.save_image(feature_vis, f"{out_path}/log_images/slot_visualization/{iteration}/slot_{i}_feature.jpg")
+        torchvision.utils.save_image(masked_rgb, f"{out_path}/log_images/slot_visualization/{iteration}/slot_{i}_masked_rgb.jpg")
         
 
 def prepare_output_and_logger(args):    
