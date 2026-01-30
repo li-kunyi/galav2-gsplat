@@ -159,8 +159,8 @@ class Attention(nn.Module):
         return out_flat
     
     def per_slot_inference(self, in_flat, i_slot):
-        out_flat, _ = self.cross_attn(in_flat, self.in_slots[i_slot].unsqueeze(0), self.tgt_slots[i_slot].unsqueeze(0))
-        return out_flat
+        out_flat, logits = self.cross_attn(in_flat, self.in_slots[i_slot].unsqueeze(0), self.tgt_slots[i_slot].unsqueeze(0))
+        return out_flat, logits
     
     def update_slots(self, in_slots, tgt_slots):
         self.in_slots = in_slots.detach().requires_grad_(True)

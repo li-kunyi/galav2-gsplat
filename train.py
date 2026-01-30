@@ -413,20 +413,25 @@ def visualizer_slot(render_pkg, iteration, out_path, attn_module, use_rgb=False)
 
     slots, _ = attn_module.get_slots()
     num_slots = slots.shape[0]
-    os.makedirs(f"{out_path}/log_images/slot_visualization/{iteration}/", exist_ok = True)
+    os.makedirs(f"{out_path}/log_images/slot_visualization/{iteration}/feature", exist_ok = True)
+    os.makedirs(f"{out_path}/log_images/slot_visualization/{iteration}/masked_rgb", exist_ok = True)
+    os.makedirs(f"{out_path}/log_images/slot_visualization/{iteration}/attn_map", exist_ok = True)
     for i in range(num_slots):
-        ##TODO also visualize the attention heatmap
-        feature = attn_module.per_slot_inference(cat_feature.reshape(-1, cat_feature.shape[-1]).float(), i)  # [H*W, D]
+        feature, logits = attn_module.per_slot_inference(cat_feature.reshape(-1, cat_feature.shape[-1]).float(), i)  # [H*W, D]
         pca = PCA(n_components=3)
         x_pca = pca.fit_transform(feature.cpu().numpy())  # [H*W, 3]
         feature_vis = torch.from_numpy(x_pca).reshape(H, W, 3).permute(2, 0, 1).to(gt_image.device)
         feature_vis = (feature_vis - feature_vis.min()) / (feature_vis.max() - feature_vis.min())
         masked_rgb = gt_image * feature_vis
 
-        torchvision.utils.save_image(feature_vis, f"{out_path}/log_images/slot_visualization/{iteration}/slot_{i}_feature.jpg")
-        torchvision.utils.save_image(masked_rgb, f"{out_path}/log_images/slot_visualization/{iteration}/slot_{i}_masked_rgb.jpg")
-        
+        # attention heat map
+        logits = logits.reshape(H, W)
+        attn_map = apply_depth_colormap(logits[..., None], None, near_plane=0.0, far_plane=1.0)
 
+        torchvision.utils.save_image(feature_vis, f"{out_path}/log_images/slot_visualization/{iteration}/feature/slot_{i}_feature.jpg")
+        torchvision.utils.save_image(masked_rgb, f"{out_path}/log_images/slot_visualization/{iteration}/masked_rgb/slot_{i}_masked_rgb.jpg")
+        torchvision.utils.save_image(attn_map, f"{out_path}/log_images/slot_visualization/{iteration}/attn_map/slot_{i}_attn_map.jpg")
+        
 def prepare_output_and_logger(args):    
     if not args.model_path:
         if os.getenv('OAR_JOB_ID'):
