@@ -34,92 +34,85 @@ class Attention(nn.Module):
         self.in_slots = torch.randn(num_slots, in_slot_dim, requires_grad=True, device='cuda:0')
         self.tgt_slots = torch.randn(num_slots, tgt_slot_dim, requires_grad=True, device='cuda:0')
 
-        # Normalization and linear layers for features
+        # Normalization and linear layers
+        # inputs and slots
         self.norm_input = nn.LayerNorm(in_feat_dim)
-        self.linear_input = nn.Linear(in_feat_dim, in_slot_dim)  
-
         self.norm_tgt = nn.LayerNorm(tgt_feat_dim)
-        self.linear_tgt = nn.Linear(tgt_feat_dim, tgt_slot_dim)
-
-        # Normalization and linear layers for slots
         self.norm_in_slots = nn.LayerNorm(in_slot_dim)
-        self.linear_in_slots = nn.Linear(in_slot_dim, in_slot_dim)
-
         self.norm_tgt_slots = nn.LayerNorm(tgt_slot_dim)
-        self.linear_tgt_slots = nn.Linear(tgt_slot_dim, tgt_slot_dim)      
 
-        # Residual linear layers
-        self.linear_residual = nn.Linear(in_feat_dim, tgt_slot_dim)  
+        self.linear_in_slots_q = nn.Linear(in_slot_dim, in_slot_dim)  # slot attn, slot as query
+        self.linear_input_k = nn.Linear(in_feat_dim, in_slot_dim)  # slot attn, input as key
 
-        # GRU cells for slot updates
-        self.gru_in = nn.GRUCell(in_slot_dim, in_slot_dim)
-        self.gru_tgt = nn.GRUCell(tgt_slot_dim, tgt_slot_dim)
-        
-        self.ln_semantic = nn.LayerNorm(tgt_slot_dim)
-        self.ln_rgb_ins = nn.LayerNorm(in_slot_dim)
+        self.linear_input_q = self.linear_input_k  # corss attn, input as query
+        self.linear_in_slots_k = self.linear_in_slots_q  # cross attn, slot as key
 
+        self.linear_input_v = nn.Linear(in_feat_dim, in_slot_dim)  # slot attn, input as value
+        self.linear_tgt_v = nn.Linear(tgt_feat_dim, tgt_slot_dim)  # slot attn, target as value
+
+        self.linear_in_slots_v = nn.Linear(in_slot_dim, in_slot_dim)  # cross attn, slot as value
+        self.linear_tgt_slots_v = nn.Linear(tgt_slot_dim, tgt_slot_dim)  # cross attn, slot as value
+
+        # cross attn outputs
+        self.norm_rgb_ins = nn.LayerNorm(in_slot_dim)
+        self.norm_semantic = nn.LayerNorm(tgt_slot_dim)
+
+        # rgb head
         self.mlp_rgb = nn.Sequential(
             nn.Linear(in_slot_dim, 64),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Linear(64, 3)
         )
 
+        # instance feature head
         self.mlp_ins = nn.Sequential(
             nn.Linear(in_slot_dim, 64),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Linear(64, ins_dim)
         )
 
+        # target feature head
         self.mlp_semantic = nn.Sequential(
             nn.Linear(tgt_slot_dim, 128),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Linear(128, 256),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Linear(256, tgt_feat_dim)
         )
+        
                 
     def slot_attn(self, inputs, targets, in_slots, tgt_slots):
         # slots as queries
-        query_input = self.linear_in_slots(self.norm_in_slots(in_slots))  # [N, D1]
-        query_tgt = self.linear_tgt_slots(self.norm_tgt_slots(tgt_slots))  # [N, D2]
+        query_input = self.linear_in_slots_q(self.norm_in_slots(in_slots))  # [N, D1]
 
         # features as keys
-        key_input = self.linear_input(self.norm_input(inputs))  # [M, D1]
-        key_tgt = self.linear_tgt(self.norm_tgt(targets))  # [M, D2] 
+        key_input = self.linear_input_k(self.norm_input(inputs))  # [M, D1]
 
-        D1 = query_input.shape[-1]  # in_slot_dim
-        D2 = query_tgt.shape[-1]  # tgt_slot_dim
-        D = D1 + D2
+        value_input = self.linear_input_v(self.norm_input(inputs))  # [M, D1]
+        value_tgt = self.linear_tgt_v(self.norm_tgt(targets))  # [M, D2] 
 
-        # Query, Key, Value
-        # q = torch.cat([query_input, query_tgt], dim=-1)  # [N, D1 + D2]
-        # k = torch.cat([key_input, key_tgt], dim=-1)  # [M, D1 + D2]
-        # v = k
-
+        D = query_input.shape[-1]  # in_slot_dim
+        
         q = query_input  # [N, D1]
         k = key_input  # [M, D1]
-        v = torch.cat([key_input, key_tgt], dim=-1)  # [M, D1 + D2]
+        v = torch.cat([value_input, value_tgt], dim=-1)  # [M, D1 + D2]
 
         # Attention
-        logits = torch.matmul(q, k.T) / math.sqrt(D1)
+        logits = torch.matmul(q, k.T) / math.sqrt(D)
         attn = F.softmax(logits, dim=-1)  # [N, M]
         updates = torch.matmul(attn, v)  # [N, D]
 
-        updates_in = updates[:, :D1]
-        updates_tgt = updates[:, D1:]
+        updates_in = updates[:, :D]
+        updates_tgt = updates[:, D:]
 
-        # GRU update
-        updated_in_slots = self.gru_in(updates_in, in_slots)
-        updated_tgt_slots = self.gru_tgt(updates_tgt, tgt_slots)
-
-        return updated_in_slots, updated_tgt_slots
+        return updates_in, updates_tgt
     
     def cross_attn(self, inputs, in_slots, tgt_slots):
-        q = self.linear_input(self.norm_input(inputs))
-        k = self.linear_in_slots(self.norm_in_slots(in_slots))
-        v = self.linear_tgt_slots(self.norm_tgt_slots(tgt_slots))
+        q = self.linear_input_q(self.norm_input(inputs))
+        k = self.linear_in_slots_k(self.norm_in_slots(in_slots))
 
-        res = self.linear_residual(self.norm_input(inputs))
+        in_v = self.linear_in_slots_v(self.norm_in_slots(in_slots))  # value for input feature
+        tgt_v = self.linear_tgt_slots_v(self.norm_tgt_slots(tgt_slots))  # value for target feature
 
         M, D = k.shape
 
@@ -127,31 +120,36 @@ class Attention(nn.Module):
         logits = torch.matmul(q, k.T) / math.sqrt(D)
         attn = F.softmax(logits, dim=-1)  # softmax over slots
 
-        # Corss attention: semantic reconstruction
-        out_semantic = torch.matmul(attn, v) #+ res
-        semantic = self.mlp_semantic(self.ln_semantic(out_semantic)) 
-        semantic = F.normalize(semantic)
+        # Self-slot attention: apperance reconstruction
+        out_rgb_ins = torch.matmul(attn, in_v) + q
+        out_rgbs_norm = self.norm_rgb_ins(out_rgb_ins)
 
-        # Self attention: apperance reconstruction
-        out_rgb_ins = torch.matmul(attn, k) #+ q
-        out_rgbs_norm = self.ln_rgb_ins(out_rgb_ins)
+        # Corss-slot attention: semantic reconstruction
+        out_semantic = torch.matmul(attn, tgt_v) + q      
+        out_semantic_norm = self.norm_semantic(out_semantic)  
         
-        rgb = self.mlp_rgb(out_rgbs_norm + q)
+        # Rgb head
+        rgb = self.mlp_rgb(out_rgbs_norm)
+
+        # Instance feature head
         ins = self.mlp_ins(out_rgbs_norm)
+
+        # Semantic head
+        semantic = self.mlp_semantic(out_semantic_norm) 
 
         # Concatenate rgb and semantic outputs
         output = {}
         output['rgb'] = rgb
         output['ins'] = ins
-        output['semantic'] = semantic
+        output['semantic'] = F.normalize(semantic)
 
         return output, attn
 
-    def forward(self, in_flat, tgt_flat, momentum=0.995):
+    def forward(self, in_flat, tgt_flat, momentum=0.999):
         # Slot Attention -> update slots
         in_slots_updates, tgt_slots_updates = self.slot_attn(in_flat, tgt_flat, self.in_slots, self.tgt_slots)
 
-        # Update slots with EMA
+        # Update slots
         updated_in_slots = self.in_slots * momentum + in_slots_updates * (1 - momentum)
         updated_tgt_slots = self.tgt_slots * momentum + tgt_slots_updates * (1 - momentum)
 
