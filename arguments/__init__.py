@@ -112,9 +112,9 @@ class OptimizationParams(ParamGroup):
         self.use_geometry = False
         self.slot_densify = False
 
-        self.semantic_iterations = 5_000
+        self.semantic_iterations = 10_000
 
-        self.lambda_rgb_recon = 1.0
+        self.lambda_rgb_recon = 10.0
         self.lambda_ins_recon = 0.1
         self.lambda_tgt_recon = 1.0
 

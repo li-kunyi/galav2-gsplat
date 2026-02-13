@@ -27,7 +27,7 @@ class Attention(nn.Module):
             in_feat_dim += self.PEn.dim
 
         if use_rgb:
-            self.rgb_embed = ColorEncoding(encode=False, out_dim=ins_dim)
+            self.rgb_embed = ColorEncoding(encode=True, out_dim=ins_dim)
             in_feat_dim += self.rgb_embed.dim
         
         # Initialize slots
@@ -77,7 +77,15 @@ class Attention(nn.Module):
             nn.ReLU(),
             nn.Linear(256, tgt_feat_dim)
         )
-                
+
+        self.mlp_decoder = nn.Sequential(
+            nn.Linear(in_slot_dim+3, 128),
+            nn.ReLU(),
+            nn.Linear(128, 128),
+            nn.ReLU(),
+            nn.Linear(128, 4),  # 3 rgb + 1 mask
+        )
+                        
     def slot_attn(self, inputs, targets, in_slots, tgt_slots):
         # slots as queries
         query_input = self.linear_in_slots(self.norm_in_slots(in_slots))  # [N, D1]
@@ -113,8 +121,27 @@ class Attention(nn.Module):
         updated_tgt_slots = self.gru_tgt(updates_tgt, tgt_slots)
 
         return updated_in_slots, updated_tgt_slots
+
+    def decoder(self, coords, slots):
+        B, K, D = slots.shape
+        _, N, _ = coords.shape
+
+        slots = slots.unsqueeze(2).expand(-1, -1, N, -1)   # [B, K, N, D]
+        coords = coords.unsqueeze(1).expand(-1, K, -1, -1) # [B, K, N, 2]
+
+        decoder_input = torch.cat([slots, coords], dim=-1)
+
+        out = self.mlp_decoder(decoder_input)  # [B, K, N, 4]
+
+        rgb = out[..., :3]
+        mask_logits = out[..., 3:]
+
+        masks = torch.softmax(mask_logits, dim=1)
+        recon = torch.sum(masks * rgb, dim=1)  # [B, N, 3]
+
+        return recon
     
-    def cross_attn(self, inputs, in_slots, tgt_slots):
+    def cross_attn(self, inputs, in_slots, tgt_slots, pts):
         q = self.linear_input(self.norm_input(inputs))
         k = self.linear_in_slots(self.norm_in_slots(in_slots))
         v = self.linear_tgt_slots(self.norm_tgt_slots(tgt_slots))
@@ -133,11 +160,14 @@ class Attention(nn.Module):
         semantic = F.normalize(semantic)
 
         # Self attention: apperance reconstruction
-        out_rgb_ins = torch.matmul(attn, k) #+ q
-        out_rgbs_norm = self.ln_rgb_ins(out_rgb_ins)
+        # out_rgb_ins = torch.matmul(attn, k) #+ q
+        # out_rgbs_norm = self.ln_rgb_ins(out_rgb_ins)
         
-        rgb = self.mlp_rgb(out_rgbs_norm + q)
-        ins = self.mlp_ins(out_rgbs_norm)
+        # rgb = self.mlp_rgb(out_rgbs_norm + q)
+        # ins = self.mlp_ins(out_rgbs_norm)
+
+        rgb = self.decoder(pts[None], in_slots[None]).squeeze(0)
+        ins = rgb
 
         # Concatenate rgb and semantic outputs
         output = {}
@@ -147,7 +177,7 @@ class Attention(nn.Module):
 
         return output, attn
 
-    def forward(self, in_flat, tgt_flat, momentum=0.995):
+    def forward(self, in_flat, tgt_flat, pts, momentum=0.995):
         # Slot Attention -> update slots
         in_slots_updates, tgt_slots_updates = self.slot_attn(in_flat, tgt_flat, self.in_slots, self.tgt_slots)
 
@@ -156,11 +186,11 @@ class Attention(nn.Module):
         updated_tgt_slots = self.tgt_slots * momentum + tgt_slots_updates * (1 - momentum)
 
         # Cross-Attention
-        out_flat, attn = self.cross_attn(in_flat, updated_in_slots, updated_tgt_slots)
+        out_flat, attn = self.cross_attn(in_flat, updated_in_slots, updated_tgt_slots, pts)
 
         return out_flat, updated_in_slots, updated_tgt_slots, attn
     
-    def inference(self, in_flat, chunk_size=8192):
+    def inference(self, in_flat, pts, chunk_size=8192):
         N = in_flat.shape[0]
 
         out_list = {}
@@ -171,8 +201,9 @@ class Attention(nn.Module):
         for start in range(0, N, chunk_size):
             end = min(start + chunk_size, N)
             chunk = in_flat[start:end]  # [chunk, K]
+            pts_chunk = pts[start:end]
 
-            out_chunk, logit_chunk = self.cross_attn(chunk, self.in_slots, self.tgt_slots)
+            out_chunk, logit_chunk = self.cross_attn(chunk, self.in_slots, self.tgt_slots, pts_chunk)
 
             out_list['rgb'].append(out_chunk['rgb'])
             out_list['ins'].append(out_chunk['ins'])

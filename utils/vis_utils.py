@@ -145,6 +145,7 @@ def visualizer_rgb(render_pkg, iteration, out_path):
 def visualizer_semantic(render_pkg, iteration, out_path, attn_module, use_rgb=True, use_geo=False, use_ins=True):
     gt_image = render_pkg["gt_image"].cuda()
     image = render_pkg["render"].cuda() if render_pkg["render"] is not None else torch.zeros_like(gt_image).to(gt_image.device)
+    pts = render_pkg["render_pts_world"].permute(1, 2, 0).cuda()
 
     instance_feature = render_pkg["render_ins_feature"].cuda()  # [D, H, W]
     instance_feature = instance_feature.permute(1, 2, 0) # From[D=16, H=730, W=988] to [H=730, W=988, D=16]
@@ -164,12 +165,11 @@ def visualizer_semantic(render_pkg, iteration, out_path, attn_module, use_rgb=Tr
         feature = torch.cat([feature, instance_feature], dim=-1)  # [H, W, C+D]
 
     if use_geo:
-        pts = render_pkg["render_pts_world"].permute(1, 2, 0).cuda()
         geo_feature = attn_module.PEn(pts)
         feature = torch.cat([feature, geo_feature.reshape(H, W, -1)], dim=-1)
 
     D = feature.shape[-1]
-    out_flat, _ = attn_module.inference(feature.reshape(-1, D).float())  # [H*W, D]
+    out_flat, _ = attn_module.inference(feature.reshape(-1, D).float(), pts.reshape(-1, 3).float())  # [H*W, D]
 
     recon_rgb = out_flat['rgb']  # [H*W, 3]
     recon_rgb = recon_rgb.reshape(H, W, 3).permute(2, 0, 1)
@@ -206,6 +206,7 @@ def visualizer_slot(render_pkg, iteration, out_path, attn_module, use_rgb=False,
     instance_feature = render_pkg["render_ins_feature"] .cuda() # [D, H, W]
     instance_feature = instance_feature.permute(1, 2, 0) # From[D=16, H=730, W=988] to [H=730, W=988, D=16]
     image = render_pkg["render"].cuda()
+    pts = render_pkg["render_pts_world"].permute(1, 2, 0).cuda()
 
     H, W, D = instance_feature.shape
     rgb = image
@@ -216,7 +217,6 @@ def visualizer_slot(render_pkg, iteration, out_path, attn_module, use_rgb=False,
         feature = torch.cat([feature, instance_feature], dim=-1)  # [H, W, C+D]
 
     if use_geo:
-        pts = render_pkg["render_pts_world"].permute(1, 2, 0).cuda()
         geo_feature = attn_module.PEn(pts)
         feature = torch.cat([feature, geo_feature.reshape(H, W, -1)], dim=-1)
 
@@ -224,7 +224,7 @@ def visualizer_slot(render_pkg, iteration, out_path, attn_module, use_rgb=False,
     num_slots = slots.shape[0]
     os.makedirs(f"{out_path}/log_images/slot_visualization/{iteration}/", exist_ok = True)
 
-    features, logits = attn_module.inference(feature.reshape(-1, feature.shape[-1]).float())  # [H*W, D]
+    features, logits = attn_module.inference(feature.reshape(-1, feature.shape[-1]).float(), pts.reshape(-1, 3).float())  # [H*W, D]
     semantics = features['semantic']
 
     pca = PCA(n_components=3)
@@ -271,7 +271,7 @@ def visualizer_ply(gaussians, iteration, out_path, attn_module, use_rgb=False, u
 
     slots, _ = attn_module.get_slots()
     num_slots = slots.shape[0]
-    features, logits = attn_module.inference(feature.reshape(-1, feature.shape[-1]).float())  # [H*W, D]
+    features, logits = attn_module.inference(feature.float(), pts.float())  # [H*W, D]
     semantics = features['semantic']
 
     pca = PCA(n_components=3)

@@ -290,7 +290,7 @@ def training_semantic(dataset, opt, save_dir, checkpoint_iterations, checkpoint,
             geo_feature_sample = Attn.PEn(pts_sample)
             feature_sample = torch.cat([feature_sample, geo_feature_sample], dim=-1)
 
-        out_feature, updated_in_slots, updated_tgt_slots, attn_weights = Attn(feature_sample.float(), tgt_feature_sample.float())
+        out_feature, updated_in_slots, updated_tgt_slots, attn_weights = Attn(feature_sample.float(), tgt_feature_sample.float(), pts_sample.float())
 
         # Reconstruction Regularization
         # RGB loss
@@ -299,10 +299,10 @@ def training_semantic(dataset, opt, save_dir, checkpoint_iterations, checkpoint,
         loss = opt.lambda_rgb_recon * rgb_loss
 
         # Instance feature loss
-        if use_ins:
-            recon_ins = out_feature['ins']
-            ins_loss = l2_loss(recon_ins, ins_feature_sample)
-            loss += opt.lambda_ins_recon * ins_loss
+        # if use_ins:
+        #     recon_ins = out_feature['ins']
+        #     ins_loss = l2_loss(recon_ins, ins_feature_sample)
+        #     loss += opt.lambda_ins_recon * ins_loss
 
         # Semantic loss
         recon_semantic = out_feature['semantic']
